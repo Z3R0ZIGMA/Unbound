@@ -6,6 +6,7 @@ Calendar, contacts and other item types are skipped and counted.
 
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 
 import pypff
@@ -47,8 +48,9 @@ class FolderNode:
 
     @property
     def is_mail(self):
-        c = self.container_class
-        return c is None or c.upper().startswith("IPF.NOTE")
+        c = (self.container_class or "").upper()
+        # IPF.Note = Exchange/PST mail folders; IPF.Imap = IMAP account folders
+        return c == "" or c.startswith("IPF.NOTE") or c.startswith("IPF.IMAP")
 
     @property
     def default_checked(self):
@@ -108,12 +110,38 @@ def _rebase(node, path, shared=False):
                       shared)
 
 
+# Names Outlook gives the folder that holds the user's mail ("IPM subtree")
+# in PST-style files, which is the layout IMAP and POP OSTs use
+MAIL_ROOT_NAMES = {
+    "top of outlook data file", "top of personal folders",
+    "top of information store", "ipm_subtree",
+}
+# Internal folders that sit beside the mail root and are never it
+NOT_MAIL_ROOT = {"search root", "spam search folder 2", "finder", "itemprocsearch",
+                 "root - public", "freebusy data", "common views", "views"}
+
+
+def _find_mail_root(raw):
+    """Pick the folder holding the user's mail in a non-Exchange layout."""
+    candidates = [c for c in raw.children if c.name.strip().lower() not in NOT_MAIL_ROOT]
+    for c in candidates:
+        if c.name.strip().lower() in MAIL_ROOT_NAMES:
+            return c
+    # Unknown name (e.g. translated Outlook): if one folder holds the mail, use it
+    with_items = [c for c in candidates if c.total_items()]
+    if len(with_items) == 1 and with_items[0].children:
+        return with_items[0]
+    return None
+
+
 def scan_folders(ost_path):
     """Return the top-level folders to show, as Outlook would.
 
-    An OST keeps the user's folders under Root - Mailbox/IPM_SUBTREE, and
-    cached shared mailboxes under Root - Mailbox/Shared Data. Those become
-    the top level of the output PST; the rest is internal Outlook data.
+    An Exchange OST keeps the user's folders under Root - Mailbox/IPM_SUBTREE
+    and cached shared mailboxes under Root - Mailbox/Shared Data. IMAP OSTs
+    and PSTs use a "Top of Outlook data file" folder instead. Either way that
+    folder's contents become the top level of the output PST; the rest is
+    internal Outlook data.
     """
     f = open_file(ost_path)
     try:
@@ -123,8 +151,11 @@ def scan_folders(ost_path):
 
     mailbox = _child(raw, "Root - Mailbox")
     ipm = mailbox and _child(mailbox, "IPM_SUBTREE")
-    if not ipm:  # not the usual OST layout (e.g. a PST): show everything
-        return [_rebase(c, (c.name,)) for c in raw.children]
+    if not ipm:
+        root = _find_mail_root(raw)
+        if root is None:  # unrecognised layout: show everything as it is
+            return [_rebase(c, (c.name,)) for c in raw.children]
+        return [_rebase(c, (c.name,)) for c in root.children]
 
     top = [_rebase(c, (c.name,)) for c in ipm.children]
     shared = _child(mailbox, "Shared Data")
@@ -150,6 +181,10 @@ class Result:
     failures: list = field(default_factory=list)
     cancelled: bool = False
     seconds: float = 0.0
+    # Diagnostics for the log: what kinds of folders and items were met
+    folder_types: Counter = field(default_factory=Counter)
+    item_types: Counter = field(default_factory=Counter)  # message class -> count
+    skipped_types: Counter = field(default_factory=Counter)
 
 
 def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
@@ -165,6 +200,8 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     start = time.time()
     result = Result()
     total = sum(n.item_count for n in selected)
+    for n in selected:
+        result.folder_types[n.container_class or "(none)"] += 1
 
     writer = outlook_writer or PstWriter(
         pst_path, display_name=os.path.splitext(os.path.basename(ost_path))[0])
@@ -199,11 +236,15 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                     item = source.get_sub_message(i)
                     if not isinstance(item, pypff.message):
                         result.skipped_not_mail += 1
+                        result.item_types["(system item)"] += 1
+                        result.skipped_types["(system item)"] += 1
                     else:
                         m = read_message(item)
                         subject = m.subject
+                        result.item_types[m.message_class] += 1
                         if not m.message_class.upper().startswith("IPM.NOTE"):
                             result.skipped_not_mail += 1
+                            result.skipped_types[m.message_class] += 1
                         else:
                             if target is None:
                                 target = writer.get_folder(list(node.path))
@@ -233,6 +274,18 @@ def write_log(result, ost_path, pst_path, log_path):
                  f"{result.skipped_not_mail}\n")
         fh.write(f"Failed: {len(result.failures)}\n")
         fh.write(f"Time: {result.seconds:.0f}s\n\n")
+
+        def counts(title, counter):
+            fh.write(f"{title}\n")
+            for name, n in counter.most_common():
+                fh.write(f"  {name}: {n}\n")
+            if not counter:
+                fh.write("  (none)\n")
+            fh.write("\n")
+        counts("Folder types converted (container class: folders)", result.folder_types)
+        counts("Item types seen (message class: items)", result.item_types)
+        counts("Item types skipped (message class: items)", result.skipped_types)
+
         if result.failures:
             fh.write("Failed items (folder | item number | subject | error)\n")
             for fl in result.failures:
