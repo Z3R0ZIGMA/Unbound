@@ -5,7 +5,7 @@ import sys
 import time
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QTreeWidget,
@@ -464,9 +464,21 @@ def _duration(seconds):
     return f"{h}h {m:02d}m"
 
 
+def _icon_path():
+    # PyInstaller unpacks bundled files to sys._MEIPASS
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "assets", "icon.ico")
+
+
 def main():
+    if sys.platform == "win32":
+        # Own taskbar identity, so Windows shows our icon rather than Python's
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Unbound.OSTtoPST")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    if os.path.exists(_icon_path()):
+        app.setWindowIcon(QIcon(_icon_path()))
     apply_dark_theme(app)
     win = MainWindow()
     win.show()

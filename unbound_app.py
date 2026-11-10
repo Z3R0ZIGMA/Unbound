@@ -4,6 +4,7 @@
 the result to REPORT.txt and exits (0 = all good). Used to test the build.
 """
 
+import os
 import sys
 
 
@@ -19,6 +20,12 @@ def self_check(report_path):
         except Exception as e:
             ok = False
             lines.append(f"FAIL {name}: {e}")
+    from unbound.app import _icon_path
+    if os.path.exists(_icon_path()):
+        lines.append("OK   icon")
+    else:
+        ok = False
+        lines.append(f"FAIL icon: not found at {_icon_path()}")
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return 0 if ok else 1

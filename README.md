@@ -31,7 +31,7 @@ skipped or failed is saved next to the PST as `<name> - Unbound log.txt`.
 
 ```bash
 .venv\Scripts\python -m pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --exclude-module tkinter unbound_app.py
+.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --icon assets/icon.ico --add-data "assets/icon.ico;assets" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --exclude-module tkinter unbound_app.py
 ```
 
 The result is `dist\Unbound.exe`, a single file that runs without Python
