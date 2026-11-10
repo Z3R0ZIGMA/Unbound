@@ -48,7 +48,7 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 
 ## Risks and first steps
 
-1. Build/install libpff (pypff) on Windows — highest risk
+1. ~~Build/install libpff (pypff) on Windows — highest risk~~ Done: `libpff-python` 20261030 installs from a prebuilt Windows wheel (no compiler needed)
 2. Test reading a real, recent OST (Outlook 2013+ format support is partial)
 3. Milestone: small app that opens a sample OST and lists its folders
 4. Then prove writing one message into a PST via Outlook COM
