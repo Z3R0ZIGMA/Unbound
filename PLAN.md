@@ -49,6 +49,9 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 ## Risks and first steps
 
 1. ~~Build/install libpff (pypff) on Windows — highest risk~~ Done: `libpff-python` 20261030 installs from a prebuilt Windows wheel (no compiler needed)
-2. Test reading a real, recent OST (Outlook 2013+ format support is partial)
+2. ~~Test reading a real, recent OST (Outlook 2013+ format support is partial)~~ Done with `scripts/list_folders.py` on two current Microsoft 365 OSTs (96 MB and 5.6 GB): every message, calendar item, contact and task read with no failures (28,292 in the large file, about 8 minutes). Findings for the reader:
+   - Open files with an absolute, backslash path (`os.path.abspath`); libpff's `\\?\` long-path handling rejects forward slashes
+   - pypff raises `OSError` when a message has no HTML or RTF body; treat that as "absent", not a failure
+   - Skip non-message items (`pypff.item`, e.g. the hidden `PersonMetadata` and `Help` folders)
 3. Milestone: small app that opens a sample OST and lists its folders
 4. Then prove writing one message into a PST via Outlook COM
