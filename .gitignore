@@ -1,5 +1,9 @@
+out/
+*.pst
+*.ost
 .venv/
 __pycache__/
 *.pyc
-out/
-*.pst
+build/
+dist/
+*.spec

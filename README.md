@@ -26,3 +26,19 @@ Check it works:
 Needs Outlook Classic installed (it writes the PST). Version 1 converts mail only;
 calendar, contacts and tasks folders are shown but greyed out. A log of anything
 skipped or failed is saved next to the PST as `<name> - Unbound log.txt`.
+
+## Build the EXE
+
+```bash
+.venv\Scripts\python -m pip install pyinstaller
+.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --exclude-module tkinter unbound_app.py
+```
+
+The result is `dist\Unbound.exe`, a single file that runs without Python
+(the PC still needs Outlook Classic). To check a build has all its libraries:
+
+```bash
+dist\Unbound.exe --check check.txt
+```
+
+Exit code 0 means everything loaded; `check.txt` lists each library.
