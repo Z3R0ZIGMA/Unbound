@@ -54,4 +54,10 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
    - pypff raises `OSError` when a message has no HTML or RTF body; treat that as "absent", not a failure
    - Skip non-message items (`pypff.item`, e.g. the hidden `PersonMetadata` and `Help` folders)
 3. Milestone: small app that opens a sample OST and lists its folders
-4. Then prove writing one message into a PST via Outlook COM
+4. ~~Then prove writing one message into a PST via Outlook COM~~ Done with `scripts/copy_one_message.py` (code in `unbound/`): a real message with 8 recipients and 4 attachments copied into a new PST and read back with pypff. Subject, sender, delivery/sent times, read state, HTML and plain body, recipients and attachments (byte-identical) all match, and the item is received mail, not a draft. Findings for the writer:
+   - A new `MailItem` always saves as an unsent draft. Create a `PostItem`, set `MessageClass = "IPM.Note"`, save, then reopen it with `GetItemFromID`; it's now a `MailItem` that accepts real recipients
+   - The first save overwrites delivery/sent times, so set them after reopening
+   - `PropertyAccessor` treats dates as local time; convert pypff's UTC times to local first
+   - Call `Recipient.Resolve()` or the address is lost (the whole text becomes the display name)
+   - Known limitation: Outlook won't let scripts write internet headers (`PR_TRANSPORT_MESSAGE_HEADERS`) or the To/Cc display lines directly (the latter are filled in from the recipients)
+   - Starting Outlook from the script can show its reminders window, which keeps Outlook running and the PST locked; release all COM references and wait for the file to unlock

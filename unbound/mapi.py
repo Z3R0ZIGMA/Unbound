@@ -1,0 +1,47 @@
+"""MAPI property tags used by both the reader and the writer.
+
+A tag is (property id << 16) | type. pypff exposes just the id as
+``entry_type``; Outlook's PropertyAccessor wants the full proptag URL.
+"""
+
+PT_LONG = 0x0003
+PT_BOOLEAN = 0x000B
+PT_UNICODE = 0x001F
+PT_SYSTIME = 0x0040
+
+# Property ids
+MESSAGE_CLASS = 0x001A
+MESSAGE_FLAGS = 0x0E07
+CLIENT_SUBMIT_TIME = 0x0039
+MESSAGE_DELIVERY_TIME = 0x0E06
+SENDER_NAME = 0x0C1A
+SENDER_ADDRTYPE = 0x0C1E
+SENDER_EMAIL_ADDRESS = 0x0C1F
+SENDER_SMTP_ADDRESS = 0x5D01
+SENT_REPRESENTING_NAME = 0x0042
+SENT_REPRESENTING_ADDRTYPE = 0x0064
+SENT_REPRESENTING_EMAIL_ADDRESS = 0x0065
+SENT_REPRESENTING_SMTP_ADDRESS = 0x5D02
+DISPLAY_TO = 0x0E04
+DISPLAY_CC = 0x0E03
+TRANSPORT_MESSAGE_HEADERS = 0x007D
+INTERNET_CPID = 0x3FDE
+INTERNET_MESSAGE_ID = 0x1035
+
+# Recipient row properties
+RECIPIENT_TYPE = 0x0C15
+DISPLAY_NAME = 0x3001
+ADDRTYPE = 0x3002
+EMAIL_ADDRESS = 0x3003
+SMTP_ADDRESS = 0x39FE
+
+# PR_MESSAGE_FLAGS bits
+MSGFLAG_READ = 0x0001
+MSGFLAG_UNSENT = 0x0008
+
+# PR_RECIPIENT_TYPE values
+MAPI_TO, MAPI_CC, MAPI_BCC = 1, 2, 3
+
+
+def proptag_url(prop_id, prop_type):
+    return f"http://schemas.microsoft.com/mapi/proptag/0x{prop_id:04X}{prop_type:04X}"
