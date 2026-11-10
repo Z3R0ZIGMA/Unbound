@@ -53,7 +53,10 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
    - Open files with an absolute, backslash path (`os.path.abspath`); libpff's `\\?\` long-path handling rejects forward slashes
    - pypff raises `OSError` when a message has no HTML or RTF body; treat that as "absent", not a failure
    - Skip non-message items (`pypff.item`, e.g. the hidden `PersonMetadata` and `Help` folders)
-3. Milestone: small app that opens a sample OST and lists its folders
+3. ~~Milestone: small app that opens a sample OST and lists its folders~~ Done, and v1 is built: `unbound_app.py` (window in `unbound/app.py`, engine in `unbound/converter.py`). Tested on a real OST: Inbox, 84 messages in 12s (~0.15s each, so a 28k-message mailbox is roughly 70 minutes). Notes:
+   - The tree shows the mailbox folders (`Root - Mailbox/IPM_SUBTREE`) as the top level, plus cached shared mailboxes (`Shared Data`) as an unticked "Shared mailboxes" group
+   - Folders are classed by container class (`IPF.Note` = mail); non-mail folders are greyed out, and system folders start unticked
+   - Meeting invites and other non-`IPM.Note` items in mail folders are skipped and counted in the log
 4. ~~Then prove writing one message into a PST via Outlook COM~~ Done with `scripts/copy_one_message.py` (code in `unbound/`): a real message with 8 recipients and 4 attachments copied into a new PST and read back with pypff. Subject, sender, delivery/sent times, read state, HTML and plain body, recipients and attachments (byte-identical) all match, and the item is received mail, not a draft. Findings for the writer:
    - A new `MailItem` always saves as an unsent draft. Create a `PostItem`, set `MessageClass = "IPM.Note"`, save, then reopen it with `GetItemFromID`; it's now a `MailItem` that accepts real recipients
    - The first save overwrites delivery/sent times, so set them after reopening

@@ -16,3 +16,13 @@ Check it works:
 ```bash
 .venv\Scripts\python -c "import pypff; print(pypff.get_version())"
 ```
+
+## Run the app
+
+```bash
+.venv\Scripts\python unbound_app.py
+```
+
+Needs Outlook Classic installed (it writes the PST). Version 1 converts mail only;
+calendar, contacts and tasks folders are shown but greyed out. A log of anything
+skipped or failed is saved next to the PST as `<name> - Unbound log.txt`.
