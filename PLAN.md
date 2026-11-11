@@ -1,50 +1,72 @@
-# OST to PST Converter – Project Plan
+# Unbound – Project Plan
 
 ## Goal
 
-A Windows desktop app that converts an Outlook OST file (copied from another machine) into a PST file, using Outlook Classic on the local machine to write the PST.
+A Windows desktop app that converts mail data into an Outlook PST file, using Outlook Classic on the local machine to write the PST:
 
-## Version 1 features
+- an Outlook **OST** (for example copied from another machine), without needing the original PC or profile
+- an **Apple Mail** export (MBOX), for moving from a Mac to Windows
+- an existing **PST**, to upgrade an old ANSI-format PST to Unicode or copy only some of its folders
 
-- Select an OST file
-- Preview folder tree with item counts
-- Choose which folders to export
-- Convert to PST with a progress bar
-- Save a log of items that failed to convert
+## Features (current: 1.2.0)
+
+- Open an OST, a PST, or an Apple Mail export folder
+- Preview the folder tree with item counts; mail, calendar and contacts folders are ticked by default, system folders and shared mailboxes are not
+- Convert mail, calendar (including repeating meetings) and contacts, with a progress bar, time remaining and cancel
+- Save a log next to the PST: what was copied, skipped, copied with warnings or failed, plus the folder and item types found
+- Converts this PC's own (locked) OST from a temporary working copy
 
 ## Architecture
 
-### 1. Reader (OST parsing)
+### 1. Readers
 
-- Uses libpff via its Python bindings (pypff)
-- Walks folders, extracts messages (headers, body, HTML/RTF), attachments
-- Does not need Outlook or the original profile
+- **OST/PST:** libpff through its Python bindings (pypff), in `unbound/ost_reader.py`. Named properties (most calendar and contact fields) are resolved by decoding the file's name-to-ID map in `unbound/props.py`, because pypff only exposes it as raw data. Recurrence patterns are decoded in `unbound/appointment.py`.
+- **MBOX:** Python's `email` package, in `unbound/mbox_reader.py`. Finds the `Name.mbox` folders of an Apple Mail export and splits each mbox file into messages.
+- Both produce the same `Message` record, so the rest of the app doesn't care where an item came from.
+- Neither needs Outlook or the original profile.
 
 ### 2. Writer (PST creation)
 
-- Uses Outlook Classic via COM automation (pywin32)
-- Creates a new PST store, recreates folder structure, adds items
-- Note: New Outlook does not support COM automation
+- Outlook Classic via COM automation (pywin32), in `unbound/pst_writer.py`
+- Creates a new Unicode PST, recreates the folder structure (with calendar and contacts folder types), adds items, then detaches the PST from the profile
+- Note: the New Outlook has no COM automation, so it can't be used
 
 ### 3. Interface
 
-- PySide6 desktop GUI
-- Packaged as a single Windows executable with PyInstaller
+- PySide6 desktop window, `unbound/app.py`; conversion engine in `unbound/converter.py`
+- Packaged as a single Windows EXE with PyInstaller, published on GitHub Releases
 
 ## Interface layout
 
-- Dark mode throughout (dark window, light text)
-- Top: file picker to select the OST file
-- Middle: folder tree with item counts and checkboxes to choose folders
-- Bottom: large Convert button with a progress bar
-- Fully customisable later (colours, logo, layout) by asking Claude Code in plain words
+- Dark mode throughout (dark window, light text); colours in one place (`COLORS`)
+- Header: grey geometric triangle logo, "Unbound", one-line description; window title "Unbound – Convert to PST"
+- Top: path box and a **Browse…** menu with "Outlook OST file…" and "Apple Mail export (folder)…" (a PST can be picked through "All files")
+- Middle: folder tree with item counts and checkboxes; unsupported folders greyed out
+- Bottom: large Convert button, progress bar with Cancel, status line
 
-## Later additions
+## Roadmap
 
-- ~~Contacts and calendar items~~ Done in version 1.1 (see below)
+Done:
+
+- ~~Contacts and calendar items~~ 1.1
+- ~~Apple Mail (Mac) MBOX to PST conversion~~ 1.2
+
+Next candidates:
+
+- Tasks, notes and journal entries; contact groups (distribution lists)
+- Emails attached to other emails (embedded messages) in OST/PST sources
+- Changed occurrences of a repeating meeting: copy a changed body and attendee list too
+- Map time zone names in IANA format (e.g. `America/New_York`, written by phones and Google) to Windows zones
+- Apple Mail: map mailbox names to Outlook's ("Sent Messages" to "Sent Items"); read Mail's own storage (`.emlx` in `~/Library/Mail`) so read/flagged status survives
 - Date range filters
 - Splitting very large PSTs
-- ~~Apple Mail (Mac) MBOX to PST conversion~~ Done in version 1.2 (see below)
+- Signing the EXE so Windows SmartScreen doesn't warn
+
+## Releases
+
+- **1.0.0:** mail from OST to PST (Exchange/Microsoft 365 and IMAP OSTs)
+- **1.1.0:** calendar and contacts; PSTs created as Unicode (1.0.0 made ANSI PSTs)
+- **1.2.0:** Apple Mail (MBOX); inline images in OST emails kept again; plain-text and rich-text mail keep their format; repeating meetings in other time zones fixed; new title, logo and Browse menu
 
 ## Risks and first steps
 
@@ -60,12 +82,12 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 4. ~~Then prove writing one message into a PST via Outlook COM~~ Done with `scripts/copy_one_message.py` (code in `unbound/`): a real message with 8 recipients and 4 attachments copied into a new PST and read back with pypff. Subject, sender, delivery/sent times, read state, HTML and plain body, recipients and attachments (byte-identical) all match, and the item is received mail, not a draft. Findings for the writer:
    - A new `MailItem` always saves as an unsent draft. Create a `PostItem`, set `MessageClass = "IPM.Note"`, save, then reopen it with `GetItemFromID`; it's now a `MailItem` that accepts real recipients
    - The first save overwrites delivery/sent times, so set them after reopening
-   - `PropertyAccessor` treats dates as local time; convert pypff's UTC times to local first
+   - ~~`PropertyAccessor` treats dates as local time; convert pypff's UTC times to local first~~ Corrected in 1.1: it's pywin32 that treats naive datetimes as local time; dates are now passed marked as UTC (see below)
    - Call `Recipient.Resolve()` or the address is lost (the whole text becomes the display name)
    - Known limitation: Outlook won't let scripts write internet headers (`PR_TRANSPORT_MESSAGE_HEADERS`) or the To/Cc display lines directly (the latter are filled in from the recipients)
    - Starting Outlook from the script can show its reminders window, which keeps Outlook running and the PST locked; release all COM references and wait for the file to unlock
 
-## Real-world testing
+## Real-world testing (1.0)
 
 - Version 1.0.0 converts OSTs from both **Exchange / Microsoft 365** and **IMAP** accounts. For IMAP, the reader treats `IPF.Imap` folders as mail and handles the PST-style "Top of Outlook data file" layout as well as Exchange's `Root - Mailbox/IPM_SUBTREE`.
 - The OST of the profile on the converting PC is locked by Outlook once it starts, so Unbound converts such files from a temporary copy taken before Outlook starts.
@@ -80,7 +102,7 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 
 ## Version 1.2: Apple Mail (MBOX)
 
-- Opens Apple Mail's "Export Mailbox" output: a folder of `Name.mbox` folders, each holding an `mbox` file, nested for sub-mailboxes. A single mbox file works too.
+- Opens Apple Mail's "Export Mailbox" output: a folder of `Name.mbox` folders, each holding an `mbox` file, nested for sub-mailboxes. Loose `.mbox` files in the chosen folder work too.
 - Messages are split on `From ` lines (with mboxrd `>From` quoting undone), parsed with Python's `email` package into the same `Message` record as the OST reader, and written by the same PST writer. Attached emails (`message/rfc822`) become `.eml` attachments.
 - Inline images keep their content ID so the HTML shows them. Outlook ignores attempts to set `PR_ATTACHMENT_HIDDEN` (reset on save) and refuses `PR_ATTACH_FLAGS`, so it decides itself whether to list them.
 - Plain-text mail is now saved as plain text (`BodyFormat = olFormatPlain`); before, Outlook turned it into HTML and the PST had no plain body.

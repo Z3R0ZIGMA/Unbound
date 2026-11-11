@@ -1,6 +1,6 @@
 # Unbound
 
-Windows desktop app that converts an Outlook OST file (for example one copied from another PC) into a PST: mail, calendar and contacts. It also converts **Apple Mail** mailboxes exported on a Mac (MBOX), for moving from a Mac to Windows. It reads the OST directly with [libpff](https://github.com/libyal/libpff), so it needs neither the original PC nor its Outlook profile, and writes the PST through Outlook Classic on this PC. See [PLAN.md](PLAN.md) for the design and roadmap.
+Windows desktop app that converts an Outlook OST file (for example one copied from another PC) into a PST: mail, calendar and contacts. It also converts **Apple Mail** mailboxes exported on a Mac (MBOX), for moving from a Mac to Windows, and can re-save an existing **PST** as a new one. It reads the OST directly with [libpff](https://github.com/libyal/libpff), so it needs neither the original PC nor its Outlook profile, and writes the PST through Outlook Classic on this PC. See [PLAN.md](PLAN.md) for the design and roadmap.
 
 ## Download
 
@@ -26,6 +26,13 @@ Tested with OSTs from **Exchange / Microsoft 365** and **IMAP** accounts.
 When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. It lists what was copied, skipped and failed, plus the folder and item types found in the file.
 
 **Moving from a Mac (Apple Mail).** On the Mac, open Mail, select the mailboxes to move (Cmd-click to pick several), then choose **Mailbox → Export Mailbox…** and pick a folder. Mail writes one `Name.mbox` folder per mailbox, with sub-mailboxes inside. Copy that whole folder to the Windows PC (USB stick, cloud drive or network share), then in Unbound choose **Browse… → Apple Mail export (folder)** and select it. It's a folder rather than a file because Apple Mail exports each mailbox as its own folder. Loose `.mbox` files from other mail programs work too: put them in a folder and select that.
+
+**Converting a PST to a new PST.** Unbound also reads PST files, which is useful to:
+
+- **Upgrade an old-format PST.** PSTs from Outlook 97–2002 (and ones made by Unbound 1.0.0) use the old ANSI format, which can't hold characters outside the Western alphabet (such as emoji or non-Latin text) and is limited to 2 GB. Converting one gives a modern Unicode PST.
+- **Copy only some folders** of a PST into a new, smaller PST.
+
+Click **Browse… → Outlook OST file**, change the file type at the bottom right of the file window from "Outlook OST files" to **All files**, and pick the PST. Everything else works as for an OST. (Characters already lost in an old-format PST can't be recovered.)
 
 **Converting this PC's own OST.** An OST in Outlook's data folder (`%LOCALAPPDATA%\Microsoft\Outlook`) may belong to the Outlook profile on this PC, and Outlook locks it while running. Unbound first makes a temporary working copy of such a file and converts from that, so it needs free disk space equal to the OST's size; the copy is deleted afterwards. If you see **"Outlook is using this file"**, close Outlook, wait a few seconds, and try again. OSTs copied from another PC aren't affected.
 
