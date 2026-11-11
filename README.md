@@ -13,6 +13,8 @@ To build it yourself instead, see [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe)
 - Windows
 - **Outlook Classic** installed on the PC doing the conversion. It writes the PST. The New Outlook can't, because it has no automation (COM) support.
 
+Tested with OSTs from **Exchange / Microsoft 365** and **IMAP** accounts.
+
 ## Using it
 
 1. Start `Unbound.exe`.
@@ -33,7 +35,6 @@ Outlook opens in the background during conversion (if it isn't already open) and
 - **No internet headers.** Outlook doesn't let other programs write them, so the raw `Received:`/routing headers aren't copied. Subject, sender, recipients, dates, read state, bodies and attachments are.
 - **Speed.** About 0.15 seconds per message through Outlook, so a 28,000-message mailbox takes roughly 70 minutes.
 - **Outlook's reminders window** may appear when Outlook starts. Leave Outlook running until the conversion finishes.
-- **IMAP OSTs** are supported but not yet tested on a real file. Exchange/Microsoft 365 OSTs are tested.
 
 ## Development
 

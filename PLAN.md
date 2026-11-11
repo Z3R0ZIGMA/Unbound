@@ -64,3 +64,8 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
    - Call `Recipient.Resolve()` or the address is lost (the whole text becomes the display name)
    - Known limitation: Outlook won't let scripts write internet headers (`PR_TRANSPORT_MESSAGE_HEADERS`) or the To/Cc display lines directly (the latter are filled in from the recipients)
    - Starting Outlook from the script can show its reminders window, which keeps Outlook running and the PST locked; release all COM references and wait for the file to unlock
+
+## Real-world testing
+
+- Version 1.0.0 converts OSTs from both **Exchange / Microsoft 365** and **IMAP** accounts. For IMAP, the reader treats `IPF.Imap` folders as mail and handles the PST-style "Top of Outlook data file" layout as well as Exchange's `Root - Mailbox/IPM_SUBTREE`.
+- The OST of the profile on the converting PC is locked by Outlook once it starts, so Unbound converts such files from a temporary copy taken before Outlook starts.
