@@ -67,6 +67,7 @@ Next candidates:
 - **1.0.0:** mail from OST to PST (Exchange/Microsoft 365 and IMAP OSTs)
 - **1.1.0:** calendar and contacts; PSTs created as Unicode (1.0.0 made ANSI PSTs)
 - **1.2.0:** Apple Mail (MBOX); inline images in OST emails kept again; plain-text and rich-text mail keep their format; repeating meetings in other time zones fixed; new title, logo and Browse menu
+- **1.2.1:** fixes the EXE (1.1.0 and 1.2.0): calendar items failed with "No module named 'win32timezone'" and emails got the conversion date as their received date, because PyInstaller left out a module pywin32 loads on demand. The self-check now passes a date through COM, the log lists refused properties, and `Unbound.exe --convert` lets the EXE itself be tested end to end
 
 ## Risks and first steps
 

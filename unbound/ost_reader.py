@@ -56,8 +56,9 @@ class OstInUseError(OSError):
     def __init__(self, path):
         super().__init__(
             "Outlook is using this file, so it can't be read right now.\n\n"
-            "It's the data file of the Outlook profile on this PC. Close Outlook, "
-            "wait a few seconds for it to finish closing, then try again.\n\n"
+            "It's the data file of the Outlook profile on this PC. Close Outlook "
+            "and try again. If Outlook is already closed, Windows Search may be "
+            "indexing the file in the background: wait a minute or two and try again.\n\n"
             f"File: {path}")
 
 

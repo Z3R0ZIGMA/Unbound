@@ -34,7 +34,7 @@ When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. 
 
 Click **Browse… → Outlook OST file**, change the file type at the bottom right of the file window from "Outlook OST files" to **All files**, and pick the PST. Everything else works as for an OST. (Characters already lost in an old-format PST can't be recovered.)
 
-**Converting this PC's own OST.** An OST in Outlook's data folder (`%LOCALAPPDATA%\Microsoft\Outlook`) may belong to the Outlook profile on this PC, and Outlook locks it while running. Unbound first makes a temporary working copy of such a file and converts from that, so it needs free disk space equal to the OST's size; the copy is deleted afterwards. If you see **"Outlook is using this file"**, close Outlook, wait a few seconds, and try again. OSTs copied from another PC aren't affected.
+**Converting this PC's own OST.** An OST in Outlook's data folder (`%LOCALAPPDATA%\Microsoft\Outlook`) may belong to the Outlook profile on this PC, and Outlook locks it while running. Unbound first makes a temporary working copy of such a file and converts from that, so it needs free disk space equal to the OST's size; the copy is deleted afterwards. If you see **"Outlook is using this file"**, close Outlook and try again; if Outlook is already closed, Windows Search may be indexing the file, so wait a minute or two and try again. OSTs copied from another PC aren't affected.
 
 Outlook opens in the background during conversion (if it isn't already open) and stays open afterwards. The new PST is not left attached to your Outlook profile; to look at it, use **File → Open & Export → Open Outlook Data File** in Outlook.
 

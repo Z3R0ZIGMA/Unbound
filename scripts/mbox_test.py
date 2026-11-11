@@ -24,20 +24,26 @@ from unbound.ost_reader import _entries, _integer, _string, open_file, read_mess
 
 def main():
     work = os.path.abspath(sys.argv[1])
+    # --verify-only: check WORK_FOLDER/mbox_test.pst made by something else
+    # (e.g. "Unbound.exe --convert WORK_FOLDER/export WORK_FOLDER/mbox_test.pst")
+    # against WORK_FOLDER/export, without building or converting
+    verify_only = "--verify-only" in sys.argv[2:]
     export = os.path.join(work, "export")
     pst = os.path.join(work, "mbox_test.pst")
-    if os.path.exists(pst):
-        os.remove(pst)
-    subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "make_mbox_fixture.py"),
-                    export], check=True)
+    if not verify_only:
+        if os.path.exists(pst):
+            os.remove(pst)
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "make_mbox_fixture.py"),
+                        export], check=True)
     expected = json.load(open(os.path.join(export, "expected.json"), encoding="utf-8"))
 
-    nodes = [n for top in scan_folders(export) for n in top.walk()]
-    r = convert(export, pst, nodes)
-    write_log(r, export, pst, os.path.join(work, "mbox_test - Unbound log.txt"))
-    print(f"Converted: {dict(r.copied)}, skipped {r.skipped}, failed {len(r.failures)}")
-    for fl in r.failures:
-        print("  failure:", fl.folder, fl.error)
+    if not verify_only:
+        nodes = [n for top in scan_folders(export) for n in top.walk()]
+        r = convert(export, pst, nodes)
+        write_log(r, export, pst, os.path.join(work, "mbox_test - Unbound log.txt"))
+        print(f"Converted: {dict(r.copied)}, skipped {r.skipped}, failed {len(r.failures)}")
+        for fl in r.failures:
+            print("  failure:", fl.folder, fl.error)
 
     for _ in range(120):
         try:

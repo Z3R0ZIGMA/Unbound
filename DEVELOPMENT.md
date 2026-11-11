@@ -18,7 +18,7 @@ libpff-python ships prebuilt Windows wheels, so no C compiler is needed.
 
 ```powershell
 .venv\Scripts\python -m pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --icon assets/icon.ico --add-data "assets/icon.ico;assets" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --exclude-module tkinter unbound_app.py
+.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --icon assets/icon.ico --add-data "assets/icon.ico;assets" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone --exclude-module tkinter unbound_app.py
 ```
 
 The result is `dist\Unbound.exe` (about 43 MB). `dist/` is git-ignored so builds don't bloat the repo's history; the EXE is published as a file on a [GitHub Release](https://github.com/Z3R0ZIGMA/Unbound/releases) instead. To publish a new version after rebuilding (with the [GitHub CLI](https://cli.github.com/), signed in):
@@ -27,7 +27,7 @@ The result is `dist\Unbound.exe` (about 43 MB). `dist/` is git-ignored so builds
 gh release create v1.2.1 dist\Unbound.exe --title "Unbound 1.2.1" --notes "What changed"
 ```
 
-Rebuild right before publishing, so the EXE matches the pushed code. To check a build contains all its libraries:
+Rebuild right before publishing, so the EXE matches the pushed code. To check a build contains all its libraries and can pass dates to Outlook:
 
 ```powershell
 Start-Process dist\Unbound.exe -ArgumentList '--check', 'check.txt' -Wait
@@ -35,6 +35,8 @@ Get-Content check.txt
 ```
 
 Every line should start with `OK`.
+
+**Hidden imports matter.** PyInstaller only bundles modules it can see being imported. pywin32 loads `win32timezone` on demand, the first time a date marked with a time zone goes through COM, so the build command lists it explicitly. Without it, 1.1.0 and 1.2.0 shipped an EXE where every calendar item failed and emails got the wrong received date, although the code worked fine from source. That's why the self-check passes a real date through COM, and why the EXE itself should be tested before a release (see [Testing](#testing)).
 
 ## Testing
 
@@ -57,6 +59,23 @@ The OST tests need an OST to read. Outlook locks the OST of the profile on this 
 ```
 
 Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them), and `copy_items_test.py` fails "time zone" for appointments with an IANA zone name such as `America/New_York`. Everything else should pass.
+
+### Testing the EXE itself
+
+Code that works from source can still fail in the EXE if PyInstaller left something out, so test the built EXE before each release. `Unbound.exe` has a hidden mode that converts without the window (the folders ticked by default), writes the usual log next to the PST, and exits with 0 if nothing failed:
+
+```powershell
+# Apple Mail: convert the test export with the EXE, then check every message
+.venv\Scripts\python scripts\make_mbox_fixture.py C:\Temp\exe_test\export
+Start-Process dist\Unbound.exe -ArgumentList '--convert', 'C:\Temp\exe_test\export', 'C:\Temp\exe_test\mbox_test.pst' -Wait
+.venv\Scripts\python scripts\mbox_test.py C:\Temp\exe_test --verify-only
+
+# OST: convert with the EXE, then compare every email, appointment and contact with the source
+Start-Process dist\Unbound.exe -ArgumentList '--convert', 'C:\Temp\copy.ost', 'C:\Temp\exe_test\ost.pst' -Wait
+.venv\Scripts\python scripts\compare_pst.py C:\Temp\copy.ost C:\Temp\exe_test\ost.pst
+```
+
+`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times and full recurrence; contacts: name and email), and which field differs when one isn't. Times are compared to the second.
 
 A quick static check catches undefined names and leftover imports:
 
@@ -83,5 +102,6 @@ A quick static check catches undefined names and leftover imports:
 | `scripts/copy_one_message.py` | Command-line check: copies one message to a PST and compares every field |
 | `scripts/copy_items_test.py` | Command-line check: copies sample appointments and a contact to a PST and compares every property and the recurrence |
 | `scripts/make_mbox_fixture.py` | Builds a test Apple Mail export covering the tricky cases |
-| `scripts/mbox_test.py` | End-to-end MBOX check: builds the test export, converts it and verifies every message |
+| `scripts/mbox_test.py` | End-to-end MBOX check: builds the test export, converts it and verifies every message (`--verify-only` checks a PST made by the EXE) |
+| `scripts/compare_pst.py` | Compares a converted PST with its source, item by item |
 | `assets/make_icon.py` | Draws the app icon; re-run it after changing the colours, then rebuild |

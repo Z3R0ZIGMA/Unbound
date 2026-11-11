@@ -225,6 +225,7 @@ class Result:
     folder_types: Counter = field(default_factory=Counter)
     item_types: Counter = field(default_factory=Counter)  # message class -> count
     skipped_types: Counter = field(default_factory=Counter)
+    refused_properties: dict = field(default_factory=dict)  # property -> Outlook's error
 
     @property
     def total_copied(self):
@@ -382,6 +383,8 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 reader.close()
         finally:
             try:
+                if writer is not None:
+                    result.refused_properties = dict(writer.property_errors)
                 if writer is not None and outlook_writer is None:
                     writer.close()  # always detach the PST from the profile
             finally:
@@ -451,6 +454,12 @@ def write_log(result, ost_path, pst_path, log_path):
         counts("Folder types converted (container class: folders)", result.folder_types)
         counts("Item types seen (message class: items)", result.item_types)
         counts("Item types skipped (message class: items)", result.skipped_types)
+        if result.refused_properties:
+            fh.write("Properties Outlook didn't accept (a few are normal, e.g. ones only "
+                     "Outlook itself may set; listed to help diagnose problems)\n")
+            for prop, error in sorted(result.refused_properties.items()):
+                fh.write(f"  {prop}: {error}\n")
+            fh.write("\n")
 
         if result.warnings:
             fh.write("Copied with warnings (folder | item number | subject | warning)\n")

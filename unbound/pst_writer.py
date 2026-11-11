@@ -338,7 +338,10 @@ class PstWriter:
         try:
             accessor.SetProperty(mapi.proptag_url(prop_id, prop_type), value)
         except Exception as e:
-            self.property_errors[label] = str(e)
+            error = str(e).splitlines()[0][:200]
+            self.property_errors[label] = error
+            # Sender and dates matter to the reader, so flag the item itself
+            self.warnings.append(f"couldn't set the {label} ({error})")
 
     def _set_sender_and_times(self, item, m):
         pa = item.PropertyAccessor
