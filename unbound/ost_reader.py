@@ -33,12 +33,21 @@ class Message:
     is_read: bool
     plain_body: str | None
     html_body: str | None
+    rtf_body: bytes | None
     transport_headers: str | None
     recipients: list[Recipient] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
+    # Attached emails (embedded messages) can't be recreated yet; counted
+    # so the log can report them
+    skipped_embedded: int = 0
 
 
-class OstInUseError(Exception):
+ATTACH_METHOD = 0x3705
+ATTACH_EMBEDDED_MSG = 5
+ATTACHMENT_HIDDEN = 0x7FFE
+
+
+class OstInUseError(OSError):
     """The file is locked, almost always by Outlook using it for its profile."""
 
     def __init__(self, path):
@@ -137,8 +146,19 @@ def read_message(msg):
             ))
 
     attachments = []
+    skipped_embedded = 0
     for i in range(msg.number_of_attachments):
         a = msg.get_attachment(i)
+        try:
+            att_props = _entries(a.record_sets[0])
+        except (OSError, IndexError):
+            att_props = {}
+        hidden = att_props.get(ATTACHMENT_HIDDEN)
+        if hidden is not None and hidden.data and hidden.data[0]:
+            continue  # e.g. a changed occurrence of a repeating appointment
+        if _integer(att_props, ATTACH_METHOD) == ATTACH_EMBEDDED_MSG:
+            skipped_embedded += 1
+            continue
         size = a.size or 0
         data = a.read_buffer(size) if size else b""
         name = _optional(lambda: a.long_filename) or f"attachment_{i + 1}"
@@ -155,7 +175,9 @@ def read_message(msg):
         is_read=bool(flags & mapi.MSGFLAG_READ),
         plain_body=plain.decode("utf-8", errors="replace") if plain else None,
         html_body=_decode_html(_optional(lambda: msg.html_body), codepage),
+        rtf_body=_optional(lambda: msg.rtf_body),
         transport_headers=_optional(lambda: msg.transport_headers),
         recipients=recipients,
         attachments=attachments,
+        skipped_embedded=skipped_embedded,
     )

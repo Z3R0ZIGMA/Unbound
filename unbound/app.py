@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .converter import convert, scan_folders, write_log
+from .converter import CALENDAR, CONTACTS, MAIL, convert, scan_folders, write_log
 from .ost_reader import OstInUseError
 
 APP_NAME = "Unbound"
@@ -29,9 +29,8 @@ COLORS = {
     "border": "#3a3d43",
 }
 
-FOLDER_KIND = {
-    "IPF.APPOINTMENT": "calendar",
-    "IPF.CONTACT": "contacts",
+FOLDER_KIND = {  # labels for folders that aren't converted yet
+    "IPF.CONTACT.RECIPIENTCACHE": "address cache",
     "IPF.TASK": "tasks",
     "IPF.STICKYNOTE": "notes",
     "IPF.JOURNAL": "journal",
@@ -265,17 +264,19 @@ class MainWindow(QMainWindow):
         item = QTreeWidgetItem([node.name or "(unnamed)", ""])
         item.setData(0, NODE_ROLE, node)
         count = f"{node.item_count:,}" if node.item_count else ""
-        if node.is_mail:
+        if node.is_supported:
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(0, Qt.Checked if node.default_checked else Qt.Unchecked)
+            if node.kind != MAIL:
+                count = f"{count} · {node.kind}" if count else node.kind
         else:
-            # Tree items are tickable by default in Qt; non-mail folders mustn't be
+            # Tree items are tickable by default in Qt; unsupported folders mustn't be
             item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
-            kind = FOLDER_KIND.get((node.container_class or "").upper(), "not mail")
+            kind = FOLDER_KIND.get((node.container_class or "").upper(), "not converted")
             count = f"{count} ({kind} – later version)" if count else f"({kind})"
             item.setForeground(0, QColor(COLORS["muted"]))
             item.setForeground(1, QColor(COLORS["muted"]))
-            item.setToolTip(0, "Only mail is converted in this version")
+            item.setToolTip(0, "This kind of folder isn't converted yet")
         item.setText(1, count)
         item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
         for c in node.children:
@@ -404,10 +405,14 @@ class MainWindow(QMainWindow):
         self.status.setText(f"{word} in {_duration(result.seconds)}. Log: {log_path}")
         if not result.cancelled:
             self.progress.setValue(self.progress.maximum())
-        lines = [f"Copied: {result.copied:,}"]
-        if result.skipped_not_mail:
-            lines.append(f"Skipped (calendar, contacts and other non-mail items): "
-                         f"{result.skipped_not_mail:,}")
+        c = result.copied
+        lines = [f"Copied: {c[MAIL]:,} emails, {c[CALENDAR]:,} calendar items, "
+                 f"{c[CONTACTS]:,} contacts"]
+        if result.skipped:
+            lines.append(f"Skipped (tasks, notes, contact groups and other items "
+                         f"not converted yet): {result.skipped:,}")
+        if result.warnings:
+            lines.append(f"Copied with warnings: {len(result.warnings):,} (see the log)")
         lines.append(f"Failed: {len(result.failures):,}")
         lines += ["", f"PST: {self.pst_path}", f"Log: {log_path}"]
         box = QMessageBox(self)

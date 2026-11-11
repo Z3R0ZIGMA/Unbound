@@ -69,3 +69,11 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 
 - Version 1.0.0 converts OSTs from both **Exchange / Microsoft 365** and **IMAP** accounts. For IMAP, the reader treats `IPF.Imap` folders as mail and handles the PST-style "Top of Outlook data file" layout as well as Exchange's `Root - Mailbox/IPM_SUBTREE`.
 - The OST of the profile on the converting PC is locked by Outlook once it starts, so Unbound converts such files from a temporary copy taken before Outlook starts.
+
+## Version 1.1: calendar and contacts
+
+- Appointments and contacts are copied property by property: every MAPI property of the source item is read (named properties resolved by decoding the file's name-to-ID map, since pypff only exposes it as raw data) and written with `PropertyAccessor`.
+- Outlook refuses raw writes of an appointment's recurrence and time-zone properties and recomputes start/end on save, so those go through the object model: `StartTimeZone`, `StartUTC`/`EndUTC`, `GetRecurrencePattern()`, and `GetOccurrence()` for cancelled and changed occurrences. The recurrence blob is decoded per [MS-OXOCAL] 2.2.1.44; checked against real files, `ARO_APPTCOLOR` carries no data in `ExceptionInfo`.
+- pywin32 converts naive datetimes from local time to UTC on their way into COM but passes UTC-aware ones unchanged, so all dates are handed over marked UTC.
+- Tested on a real OST: 616/616 appointments (including 64 repeating series with cancelled and changed occurrences) and all contacts identical after conversion.
+- Fixed in passing: the PST was created with `olStoreANSI` (3) instead of `olStoreUnicode` (2), which lost characters outside the Western code page and limited the PST to 2 GB; hidden attachments (a series' changed occurrences) and attached emails were copied as broken files.

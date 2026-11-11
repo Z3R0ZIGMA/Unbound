@@ -1,7 +1,8 @@
 """Conversion engine: folder tree scan and OST -> PST copy. No GUI code here.
 
-Version 1 copies mail only (message classes starting with IPM.Note).
-Calendar, contacts and other item types are skipped and counted.
+Copies mail (IPM.Note*), appointments (IPM.Appointment*) and contacts
+(IPM.Contact). Tasks, notes, contact groups, meeting requests and other item
+types are skipped and counted in the log.
 """
 
 import os
@@ -14,6 +15,9 @@ from dataclasses import dataclass, field
 import pypff
 
 from .ost_reader import OstInUseError, is_lock_error, open_file, read_message
+from .props import load_name_map, read_props
+
+MAIL, CALENDAR, CONTACTS = "mail", "calendar", "contacts"
 
 # Hidden system folders that hold no user mail; unticked by default
 SYSTEM_FOLDERS = {
@@ -49,14 +53,27 @@ class FolderNode:
         return n in SYSTEM_FOLDERS or n.startswith("{") or n.startswith("ms-olk-")
 
     @property
-    def is_mail(self):
+    def kind(self):
+        """MAIL, CALENDAR, CONTACTS, or None for folders not converted yet."""
         c = (self.container_class or "").upper()
         # IPF.Note = Exchange/PST mail folders; IPF.Imap = IMAP account folders
-        return c == "" or c.startswith("IPF.NOTE") or c.startswith("IPF.IMAP")
+        if c == "" or c.startswith("IPF.NOTE") or c.startswith("IPF.IMAP"):
+            return MAIL
+        if c.startswith("IPF.APPOINTMENT"):
+            return CALENDAR
+        # Plain contact folders only; IPF.Contact.RecipientCache etc. are
+        # Outlook's hidden address caches
+        if c == "IPF.CONTACT":
+            return CONTACTS
+        return None
+
+    @property
+    def is_supported(self):
+        return self.kind is not None
 
     @property
     def default_checked(self):
-        return self.is_mail and not self.is_system and not self.shared
+        return self.is_supported and not self.is_system and not self.shared
 
     def total_items(self):
         return self.item_count + sum(c.total_items() for c in self.children)
@@ -178,26 +195,48 @@ class Failure:
 
 @dataclass
 class Result:
-    copied: int = 0
-    skipped_not_mail: int = 0
+    copied: Counter = field(default_factory=Counter)  # MAIL/CALENDAR/CONTACTS -> count
+    skipped: int = 0
     failures: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)  # items copied only partly
     cancelled: bool = False
     seconds: float = 0.0
+    skipped_attached_emails: int = 0
     # Diagnostics for the log: what kinds of folders and items were met
     folder_types: Counter = field(default_factory=Counter)
     item_types: Counter = field(default_factory=Counter)  # message class -> count
     skipped_types: Counter = field(default_factory=Counter)
 
+    @property
+    def total_copied(self):
+        return sum(self.copied.values())
+
+
+def item_kind(message_class):
+    c = message_class.upper()
+    if c.startswith("IPM.NOTE"):
+        return MAIL
+    if c.startswith("IPM.APPOINTMENT"):
+        return CALENDAR
+    if c == "IPM.CONTACT" or c.startswith("IPM.CONTACT."):
+        return CONTACTS
+    return None  # tasks, notes, contact groups, meeting requests, ...
+
 
 def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
             outlook_writer=None):
-    """Copy mail from the selected FolderNodes of ost_path into a new PST.
+    """Copy mail, appointments and contacts from the selected FolderNodes
+    of ost_path into a new PST.
 
     progress(done, total, folder_path) is called after each item.
     should_cancel() is polled between items.
     outlook_writer lets tests inject a writer; normally a PstWriter is made.
     """
-    from .pst_writer import PstWriter
+    from .pst_writer import (
+        OL_APPOINTMENT_ITEM, OL_CONTACT_ITEM, OL_FOLDER_CALENDAR, OL_FOLDER_CONTACTS, PstWriter,
+    )
+    folder_type = {CALENDAR: OL_FOLDER_CALENDAR, CONTACTS: OL_FOLDER_CONTACTS}
+    item_type = {CALENDAR: OL_APPOINTMENT_ITEM, CONTACTS: OL_CONTACT_ITEM}
 
     start = time.time()
     result = Result()
@@ -217,7 +256,11 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     f = writer = None
     done = 0
     try:
+        # Folder kind for every path, so parents of a calendar or contacts
+        # folder are created with the right type too
+        kinds_by_path = {n.path: n.kind for top in scan_folders(read_path) for n in top.walk()}
         f = open_file(read_path)
+        name_map = load_name_map(f)
         writer = outlook_writer or PstWriter(
             pst_path, display_name=os.path.splitext(os.path.basename(ost_path))[0])
         folders_by_id = {}
@@ -238,7 +281,7 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 result.failures.append(Failure(label, -1, "", "folder could not be opened"))
                 done += node.item_count
                 continue
-            target = None  # created on first mail item, so empty folders aren't made
+            target = None  # created on the first item copied, so empty folders aren't made
             for i in range(node.item_count):
                 if should_cancel and should_cancel():
                     result.cancelled = True
@@ -247,21 +290,32 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 try:
                     item = source.get_sub_message(i)
                     if not isinstance(item, pypff.message):
-                        result.skipped_not_mail += 1
+                        result.skipped += 1
                         result.item_types["(system item)"] += 1
                         result.skipped_types["(system item)"] += 1
                     else:
                         m = read_message(item)
                         subject = m.subject
                         result.item_types[m.message_class] += 1
-                        if not m.message_class.upper().startswith("IPM.NOTE"):
-                            result.skipped_not_mail += 1
+                        kind = item_kind(m.message_class)
+                        if kind is None:
+                            result.skipped += 1
                             result.skipped_types[m.message_class] += 1
                         else:
                             if target is None:
-                                target = writer.get_folder(list(node.path))
-                            writer.add_message(target, m)
-                            result.copied += 1
+                                parts = list(node.path)
+                                types = [folder_type.get(kinds_by_path.get(tuple(parts[:k + 1])))
+                                         for k in range(len(parts))]
+                                target = writer.get_folder(parts, types)
+                            warnings_before = len(writer.warnings)
+                            if kind == MAIL:
+                                writer.add_message(target, m)
+                            else:
+                                writer.add_item(target, item_type[kind], m, read_props(item, name_map))
+                            result.copied[kind] += 1
+                            result.skipped_attached_emails += m.skipped_embedded
+                            for w in writer.warnings[warnings_before:]:
+                                result.warnings.append(Failure(label, i, subject, w))
                 except Exception as e:  # one bad item must not stop the run
                     result.failures.append(Failure(label, i, subject, str(e).splitlines()[0][:300]))
                 done += 1
@@ -323,10 +377,14 @@ def write_log(result, ost_path, pst_path, log_path):
         fh.write(f"Source: {ost_path}\nOutput: {pst_path}\n")
         fh.write(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                  f"{'  (cancelled)' if result.cancelled else ''}\n")
-        fh.write(f"Copied: {result.copied}\n")
-        fh.write(f"Skipped (not mail; calendar/contacts come in a later version): "
-                 f"{result.skipped_not_mail}\n")
+        fh.write(f"Copied: {result.total_copied} (mail {result.copied[MAIL]}, "
+                 f"calendar {result.copied[CALENDAR]}, contacts {result.copied[CONTACTS]})\n")
+        fh.write(f"Skipped (tasks, notes, contact groups, meeting requests and other "
+                 f"items not converted yet): {result.skipped}\n")
         fh.write(f"Failed: {len(result.failures)}\n")
+        if result.skipped_attached_emails:
+            fh.write(f"Emails attached to other items, not copied yet: "
+                     f"{result.skipped_attached_emails}\n")
         fh.write(f"Time: {result.seconds:.0f}s\n\n")
 
         def counts(title, counter):
@@ -340,6 +398,11 @@ def write_log(result, ost_path, pst_path, log_path):
         counts("Item types seen (message class: items)", result.item_types)
         counts("Item types skipped (message class: items)", result.skipped_types)
 
+        if result.warnings:
+            fh.write("Copied with warnings (folder | item number | subject | warning)\n")
+            for w in result.warnings:
+                fh.write(f"{w.folder} | {w.index + 1} | {w.subject} | {w.error}\n")
+            fh.write("\n")
         if result.failures:
             fh.write("Failed items (folder | item number | subject | error)\n")
             for fl in result.failures:
