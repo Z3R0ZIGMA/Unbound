@@ -4,7 +4,9 @@ Windows desktop app that converts an Outlook OST file (for example one copied fr
 
 ## Download
 
-Unbound runs as a single file, `Unbound.exe`, that needs nothing else installed apart from Outlook Classic (below). The EXE isn't stored in this repo, to keep it small; build it with the steps in [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe), which put it at `dist\Unbound.exe`. Windows SmartScreen may warn the first time because the EXE isn't signed; choose **More info → Run anyway**.
+Download **`Unbound.exe`** from the [latest release](https://github.com/Z3R0ZIGMA/Unbound/releases/latest). It's a single file that needs nothing else installed apart from Outlook Classic (below). Windows SmartScreen may warn the first time because the EXE isn't signed; choose **More info → Run anyway**.
+
+To build it yourself instead, see [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe).
 
 ## Requirements
 

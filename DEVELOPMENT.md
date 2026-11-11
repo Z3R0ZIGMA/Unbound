@@ -21,7 +21,11 @@ libpff-python ships prebuilt Windows wheels, so no C compiler is needed.
 .venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --icon assets/icon.ico --add-data "assets/icon.ico;assets" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --exclude-module tkinter unbound_app.py
 ```
 
-The result is `dist\Unbound.exe` (about 43 MB). `dist/` is git-ignored so builds don't bloat the repo's history; share the EXE some other way, such as a GitHub Release.
+The result is `dist\Unbound.exe` (about 43 MB). `dist/` is git-ignored so builds don't bloat the repo's history; the EXE is published as a file on a [GitHub Release](https://github.com/Z3R0ZIGMA/Unbound/releases) instead. To publish a new version after rebuilding (with the [GitHub CLI](https://cli.github.com/), signed in):
+
+```powershell
+gh release create v1.0.1 dist\Unbound.exe --title "Unbound 1.0.1" --notes "What changed"
+```
 
 To check a build contains all its libraries:
 
