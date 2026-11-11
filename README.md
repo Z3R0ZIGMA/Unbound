@@ -18,14 +18,14 @@ Tested with OSTs from **Exchange / Microsoft 365** and **IMAP** accounts.
 ## Using it
 
 1. Start `Unbound.exe`.
-2. Click **Browse…** and choose **Outlook data file** to pick an OST, or **Apple Mail export folder** for mail exported from a Mac (see below). The folder tree appears with item counts.
+2. Click **Browse…** and choose **Outlook OST file** to pick an OST, or **Apple Mail export (folder)** for mail exported from a Mac (see below). The folder tree appears with item counts.
 3. Tick the folders to convert. Your mail, calendar and contacts folders start ticked; hidden system folders and **Shared mailboxes** start unticked. Ticking a folder ticks its subfolders too. **Select all mail** puts the ticks back to that starting selection, and **Clear** unticks everything.
 4. Click **Convert to PST** and choose where to save the PST. Save it somewhere other than Outlook's own data folder, such as Documents.
 5. Wait for the progress bar. You can cancel at any time; what's already copied stays in the PST.
 
 When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. It lists what was copied, skipped and failed, plus the folder and item types found in the file.
 
-**Moving from a Mac (Apple Mail).** On the Mac, open Mail, select the mailboxes to move (Cmd-click to pick several), then choose **Mailbox → Export Mailbox…** and pick a folder. Mail writes one `Name.mbox` folder per mailbox, with sub-mailboxes inside. Copy that whole folder to the Windows PC (USB stick, cloud drive or network share), then in Unbound choose **Browse… → Apple Mail export folder** and select it. A single `.mbox` file from another mail program can be opened with **Browse… → Single MBOX file**.
+**Moving from a Mac (Apple Mail).** On the Mac, open Mail, select the mailboxes to move (Cmd-click to pick several), then choose **Mailbox → Export Mailbox…** and pick a folder. Mail writes one `Name.mbox` folder per mailbox, with sub-mailboxes inside. Copy that whole folder to the Windows PC (USB stick, cloud drive or network share), then in Unbound choose **Browse… → Apple Mail export (folder)** and select it. It's a folder rather than a file because Apple Mail exports each mailbox as its own folder. Loose `.mbox` files from other mail programs work too: put them in a folder and select that.
 
 **Converting this PC's own OST.** An OST in Outlook's data folder (`%LOCALAPPDATA%\Microsoft\Outlook`) may belong to the Outlook profile on this PC, and Outlook locks it while running. Unbound first makes a temporary working copy of such a file and converts from that, so it needs free disk space equal to the OST's size; the copy is deleted afterwards. If you see **"Outlook is using this file"**, close Outlook, wait a few seconds, and try again. OSTs copied from another PC aren't affected.
 

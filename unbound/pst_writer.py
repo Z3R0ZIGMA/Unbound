@@ -201,7 +201,12 @@ class PstWriter:
             return dt
 
     def _set_times(self, item, a):
-        tz_start = self._tz(a.get(cal.LID_TZ_START_DISPLAY) or a.get(cal.LID_TZ_RECUR))
+        # A repeating series' times are defined in its recurrence time zone;
+        # the start "display" zone can differ (or be wrong), so prefer it
+        if a.get(cal.LID_RECUR):
+            tz_start = self._tz(a.get(cal.LID_TZ_RECUR) or a.get(cal.LID_TZ_START_DISPLAY))
+        else:
+            tz_start = self._tz(a.get(cal.LID_TZ_START_DISPLAY) or a.get(cal.LID_TZ_RECUR))
         tz_end = self._tz(a.get(cal.LID_TZ_END_DISPLAY)) or tz_start
         if tz_start is not None:
             item.StartTimeZone = tz_start
@@ -312,6 +317,9 @@ class PstWriter:
             tz = self._set_times(item, a) if is_appt else None
             item.Save()
         if recurrence is not None:
+            # (Outlook resets the series' start "display" zone to this PC's
+            # here whatever we set; the recurrence keeps the original zone,
+            # which is what defines the series' times.)
             self._set_recurrence(item, recurrence)
             item.Save()
             self._apply_exceptions(item, recurrence, tz)
@@ -355,6 +363,13 @@ class PstWriter:
         post.Subject = m.subject
         if m.html_body:
             post.HTMLBody = m.html_body
+        elif m.rtf_body:
+            # Rich-text mail (common between Outlook users) keeps its formatting
+            try:
+                post.RTFBody = m.rtf_body
+            except Exception:
+                post.BodyFormat = OL_FORMAT_PLAIN
+                post.Body = m.plain_body or ""
         elif m.plain_body:
             # Keep plain-text mail plain; otherwise Outlook stores it as HTML
             post.BodyFormat = OL_FORMAT_PLAIN

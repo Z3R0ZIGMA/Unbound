@@ -4,7 +4,7 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -160,7 +160,7 @@ class ConvertWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} – OST to PST")
+        self.setWindowTitle(f"{APP_NAME} – Convert to PST")
         self.resize(760, 680)
         self.ost_path = None
         self.thread = None
@@ -173,11 +173,24 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(12)
 
+        # Header: triangle logo, name, one-line description
+        title_row = QHBoxLayout()
+        title_row.setSpacing(12)
+        if os.path.exists(_icon_path()):
+            logo = QLabel()
+            logo.setObjectName("logo")
+            size = 40
+            # pixmap at the screen's scale so it stays sharp on high-DPI displays
+            logo.setPixmap(QIcon(_icon_path()).pixmap(QSize(size, size), self.devicePixelRatioF()))
+            logo.setFixedSize(size, size)
+            title_row.addWidget(logo)
         title = QLabel(APP_NAME)
         title.setObjectName("title")
+        title_row.addWidget(title)
+        title_row.addStretch(1)
         subtitle = QLabel("Convert an Outlook OST or an Apple Mail export (MBOX) into a PST")
         subtitle.setObjectName("muted")
-        lay.addWidget(title)
+        lay.addLayout(title_row)
         lay.addWidget(subtitle)
 
         # Top: file picker
@@ -187,9 +200,8 @@ class MainWindow(QMainWindow):
         self.path_edit.setPlaceholderText("Choose an OST file or an Apple Mail export…")
         self.browse_btn = QPushButton("Browse…")
         menu = QMenu(self.browse_btn)
-        menu.addAction("Outlook data file (OST or PST)…", self.choose_file)
-        menu.addAction("Apple Mail export folder…", self.choose_mbox_folder)
-        menu.addAction("Single MBOX file…", self.choose_mbox_file)
+        menu.addAction("Outlook OST file…", self.choose_file)
+        menu.addAction("Apple Mail export (folder)…", self.choose_mbox_folder)
         self.browse_btn.setMenu(menu)
         row.addWidget(self.path_edit, 1)
         row.addWidget(self.browse_btn)
@@ -241,24 +253,21 @@ class MainWindow(QMainWindow):
     # ---------- file and tree ----------
 
     def choose_mbox_folder(self):
-        # Apple Mail's Export Mailbox writes "Name.mbox" folders; pick either
-        # one of those or the folder they were exported into
+        # Apple Mail's Export Mailbox writes one "Name.mbox" folder per
+        # mailbox, so this picks a folder: the one they were exported into
+        # (or a single .mbox folder). Loose .mbox files in it work too.
         path = QFileDialog.getExistingDirectory(
-            self, "Choose the Apple Mail export folder (or one .mbox folder)")
-        if path:
-            self.load_file(path)
-
-    def choose_mbox_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Choose an MBOX file", "", "MBOX files (*.mbox mbox);;All files (*)")
+            self, "Choose the folder you exported from Apple Mail")
         if path:
             self.load_file(path)
 
     def choose_file(self):
         start = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
+        # A PST can still be opened through "All files" (e.g. to re-save an
+        # old ANSI PST as Unicode), but OST is what this is for
         path, _ = QFileDialog.getOpenFileName(
             self, "Choose an OST file", start if os.path.isdir(start) else "",
-            "Outlook data files (*.ost *.pst);;All files (*)")
+            "Outlook OST files (*.ost);;All files (*)")
         if path:
             self.load_file(path)
 
@@ -527,6 +536,6 @@ def main():
     apply_dark_theme(app)
     win = MainWindow()
     win.show()
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):  # file or export folder
         win.load_file(sys.argv[1])
     sys.exit(app.exec())

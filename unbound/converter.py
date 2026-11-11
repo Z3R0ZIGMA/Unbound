@@ -328,6 +328,8 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
         writer = outlook_writer or PstWriter(pst_path, display_name=name)
 
         for node in selected:
+            if not node.item_count:
+                continue  # nothing to copy (e.g. an Apple mailbox that only holds others)
             source = reader.folder(node)
             label = "/".join(node.path)
             if source is None:

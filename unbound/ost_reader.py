@@ -47,6 +47,7 @@ ATTACH_METHOD = 0x3705
 ATTACH_EMBEDDED_MSG = 5
 ATTACHMENT_HIDDEN = 0x7FFE
 ATTACH_CONTENT_ID = 0x3712
+ATTACH_SHORT_FILENAME = 0x3704  # 8.3 name, used when there is no long one
 
 
 class OstInUseError(OSError):
@@ -165,10 +166,11 @@ def read_message(msg):
                 skipped_embedded += 1
             continue
         # Other hidden attachments (usually images shown inside an HTML
-        # email) are kept; the writer hides them again via their content id
+        # email) are kept, with their content id so the HTML can show them
         size = a.size or 0
         data = a.read_buffer(size) if size else b""
-        name = _optional(lambda: a.long_filename) or f"attachment_{i + 1}"
+        name = (_optional(lambda: a.long_filename) or _string(att_props, ATTACH_SHORT_FILENAME)
+                or f"attachment_{i + 1}")
         cid = _string(att_props, ATTACH_CONTENT_ID)
         attachments.append(Attachment(filename=name, data=data,
                                       content_id=cid.strip().strip("<>") if cid else None))

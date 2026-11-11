@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pypff  # noqa: E402
 
 from unbound import mapi  # noqa: E402
-from unbound.ost_reader import open_file, read_message, _entries, _integer, _string  # noqa: E402
+from unbound.ost_reader import open_file, read_message, _entries, _integer  # noqa: E402
 from unbound.pst_writer import PstWriter  # noqa: E402
 
 
