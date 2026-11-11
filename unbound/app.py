@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from .converter import convert, scan_folders, write_log
+from .ost_reader import OstInUseError
 
 APP_NAME = "Unbound"
 
@@ -102,8 +103,11 @@ class ScanWorker(QObject):
     def run(self):
         try:
             self.done.emit(scan_folders(self.path))
+        except OstInUseError as e:
+            self.failed.emit(str(e))
         except Exception as e:
-            self.failed.emit(str(e).splitlines()[0])
+            self.failed.emit("This file couldn't be opened as an Outlook data file.\n\n"
+                             + str(e).splitlines()[0][:400])
 
 
 class ConvertWorker(QObject):
@@ -127,8 +131,11 @@ class ConvertWorker(QObject):
                 result = convert(self.ost, self.pst, self.nodes,
                                  progress=lambda d, t, f: self.progress.emit(d, t, f),
                                  should_cancel=lambda: self._cancel)
+            except OstInUseError as e:
+                self.failed.emit(str(e))
+                return
             except Exception as e:
-                msg = str(e).splitlines()[0]
+                msg = str(e).splitlines()[0][:400]
                 if "Outlook.Application" in msg or "Invalid class string" in msg:
                     msg = ("Couldn't start Outlook. Unbound needs Outlook Classic "
                            "installed on this PC (the New Outlook can't write PST files).")
@@ -240,8 +247,7 @@ class MainWindow(QMainWindow):
 
     def on_scan_failed(self, msg):
         self.summary.setText("Couldn't read this file")
-        QMessageBox.warning(self, APP_NAME,
-                            f"This file couldn't be opened as an Outlook data file.\n\n{msg}")
+        QMessageBox.warning(self, APP_NAME, msg)
         self.ost_path = None
         self.update_controls()
 
@@ -374,6 +380,9 @@ class MainWindow(QMainWindow):
         self.update_controls()
 
     def on_progress(self, done, total, folder):
+        if done == 0:  # a setup step, e.g. making a working copy of the OST
+            self.status.setText(folder)
+            return
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(done)
         elapsed = time.time() - self.started

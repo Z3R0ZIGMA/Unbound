@@ -21,6 +21,8 @@ A ready-built **[dist/Unbound.exe](dist/Unbound.exe)** is included in this repo.
 
 When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. It lists what was copied, skipped and failed, plus the folder and item types found in the file.
 
+**Converting this PC's own OST.** An OST in Outlook's data folder (`%LOCALAPPDATA%\Microsoft\Outlook`) may belong to the Outlook profile on this PC, and Outlook locks it while running. Unbound first makes a temporary working copy of such a file and converts from that, so it needs free disk space equal to the OST's size; the copy is deleted afterwards. If you see **"Outlook is using this file"**, close Outlook, wait a few seconds, and try again. OSTs copied from another PC aren't affected.
+
 Outlook opens in the background during conversion (if it isn't already open) and stays open afterwards. The new PST is not left attached to your Outlook profile; to look at it, use **File → Open & Export → Open Outlook Data File** in Outlook.
 
 ## Limitations (version 1)

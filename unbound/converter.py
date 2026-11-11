@@ -5,13 +5,15 @@ Calendar, contacts and other item types are skipped and counted.
 """
 
 import os
+import shutil
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 
 import pypff
 
-from .ost_reader import open_file, read_message
+from .ost_reader import OstInUseError, is_lock_error, open_file, read_message
 
 # Hidden system folders that hold no user mail; unticked by default
 SYSTEM_FOLDERS = {
@@ -203,11 +205,21 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     for n in selected:
         result.folder_types[n.container_class or "(none)"] += 1
 
-    writer = outlook_writer or PstWriter(
-        pst_path, display_name=os.path.splitext(os.path.basename(ost_path))[0])
-    f = open_file(ost_path)
+    # Outlook locks the OST of its own profile as soon as it starts, and we
+    # start Outlook to write the PST. So read such files from a copy taken
+    # before Outlook starts.
+    read_path, temp_dir = ost_path, None
+    if is_outlook_data_file(ost_path):
+        if progress:
+            progress(0, total, "Making a working copy of the OST…")
+        read_path, temp_dir = _working_copy(ost_path)
+
+    f = writer = None
     done = 0
     try:
+        f = open_file(read_path)
+        writer = outlook_writer or PstWriter(
+            pst_path, display_name=os.path.splitext(os.path.basename(ost_path))[0])
         folders_by_id = {}
 
         def index(folder):
@@ -256,11 +268,53 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 if progress:
                     progress(done, total, label)
     finally:
-        f.close()
         result.seconds = time.time() - start
-        if outlook_writer is None:
-            writer.close()
+        try:
+            if f is not None:
+                f.close()
+        finally:
+            try:
+                if writer is not None and outlook_writer is None:
+                    writer.close()  # always detach the PST from the profile
+            finally:
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
     return result
+
+
+def is_outlook_data_file(path):
+    """True for files in Outlook's own data folder, i.e. ones a profile on
+    this PC may be using. OSTs copied from elsewhere are read in place."""
+    folder = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
+    p = os.path.normcase(os.path.abspath(path))
+    return p.startswith(os.path.normcase(os.path.abspath(folder)) + os.sep)
+
+
+def _working_copy(path):
+    size = os.path.getsize(path)
+    temp_dir = tempfile.mkdtemp(prefix="unbound_")
+    free = shutil.disk_usage(temp_dir).free
+    if free < size * 1.05:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"Not enough free space for a working copy of the OST: it needs "
+            f"{size / 2**30:.1f} GB in {temp_dir}, and {free / 2**30:.1f} GB is free.")
+    copy = os.path.join(temp_dir, os.path.basename(path))
+    # A running Outlook locks parts of its OST only briefly (e.g. while
+    # syncing), so retry a few times before asking the user to close it
+    for attempt in range(4):
+        try:
+            shutil.copyfile(path, copy)
+            return copy, temp_dir
+        except OSError as e:
+            locked = isinstance(e, PermissionError) or is_lock_error(e)
+            if locked and attempt < 3:
+                time.sleep(2)
+                continue
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            if locked:
+                raise OstInUseError(os.path.abspath(path)) from e
+            raise
 
 
 def write_log(result, ost_path, pst_path, log_path):
