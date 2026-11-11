@@ -4,7 +4,7 @@ Windows desktop app that converts an Outlook OST file (for example one copied fr
 
 ## Download
 
-A ready-built **[dist/Unbound.exe](dist/Unbound.exe)** is included in this repo. It's a single file that runs without installing anything else (apart from Outlook Classic, below). On GitHub, open the file and click **Download raw file**. Windows SmartScreen may warn the first time because the EXE isn't signed; choose **More info → Run anyway**.
+Unbound runs as a single file, `Unbound.exe`, that needs nothing else installed apart from Outlook Classic (below). The EXE isn't stored in this repo, to keep it small; build it with the steps in [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe), which put it at `dist\Unbound.exe`. Windows SmartScreen may warn the first time because the EXE isn't signed; choose **More info → Run anyway**.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ A ready-built **[dist/Unbound.exe](dist/Unbound.exe)** is included in this repo.
 
 ## Using it
 
-1. Start `dist\Unbound.exe`.
+1. Start `Unbound.exe`.
 2. Click **Browse…** and choose the OST file. The folder tree appears with item counts.
 3. Tick the folders to convert. Your mail folders start ticked; hidden system folders and **Shared mailboxes** start unticked. Ticking a folder ticks its subfolders too. **Select all mail** puts the ticks back to that starting selection, and **Clear** unticks everything.
 4. Click **Convert to PST** and choose where to save the PST. Save it somewhere other than Outlook's own data folder, such as Documents.

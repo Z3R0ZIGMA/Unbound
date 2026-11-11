@@ -21,7 +21,7 @@ libpff-python ships prebuilt Windows wheels, so no C compiler is needed.
 .venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --icon assets/icon.ico --add-data "assets/icon.ico;assets" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --exclude-module tkinter unbound_app.py
 ```
 
-This replaces `dist\Unbound.exe`. The EXE is committed to the repo, so after changing the code, rebuild it and commit it together with the code change so the two stay in step. Each committed build adds about 43 MB to the repo's history.
+The result is `dist\Unbound.exe` (about 43 MB). `dist/` is git-ignored so builds don't bloat the repo's history; share the EXE some other way, such as a GitHub Release.
 
 To check a build contains all its libraries:
 
@@ -36,7 +36,7 @@ Every line should start with `OK`.
 
 | Path | What it is |
 |---|---|
-| `dist/Unbound.exe` | The built app, ready to run |
+| `dist/Unbound.exe` | The built app (not in git; created by the build above) |
 | `unbound_app.py` | Entry point (also the `--check` self-test) |
 | `unbound/app.py` | The window (PySide6, dark theme; colours are in `COLORS` at the top) |
 | `unbound/converter.py` | Folder scan and the OST → PST conversion loop, log writing |
