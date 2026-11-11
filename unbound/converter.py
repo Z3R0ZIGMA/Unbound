@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import pypff
 
+from .mbox_reader import find_mailboxes, is_mbox_source, message_offsets, parse_message, read_raw
 from .ost_reader import OstInUseError, is_lock_error, open_file, read_message
 from .props import load_name_map, read_props
 
@@ -153,7 +154,25 @@ def _find_mail_root(raw):
     return None
 
 
-def scan_folders(ost_path):
+def scan_folders(path):
+    """Top-level folders of an OST/PST or an Apple Mail / MBOX export."""
+    if is_mbox_source(path):
+        return _scan_mbox(path)
+    return _scan_pff(path)
+
+
+def _scan_mbox(path):
+    def node(box):
+        count = len(message_offsets(box.file)) if box.file else 0
+        # identifier: the mbox file to read; folder-only mailboxes get a key
+        # that never matches a file
+        ident = box.file or ("folder", box.path)
+        return FolderNode(ident, box.name, box.path, count, "IPF.Note",
+                          [node(c) for c in box.children])
+    return [node(b) for b in find_mailboxes(path)]
+
+
+def _scan_pff(ost_path):
     """Return the top-level folders to show, as Outlook would.
 
     An Exchange OST keeps the user's folders under Root - Mailbox/IPM_SUBTREE
@@ -223,6 +242,50 @@ def item_kind(message_class):
     return None  # tasks, notes, contact groups, meeting requests, ...
 
 
+class _PffReader:
+    """Items of an OST/PST through pypff."""
+
+    def __init__(self, path):
+        self.f = open_file(path)
+        self.name_map = load_name_map(self.f)
+        self.folders = {}
+
+        def index(folder):
+            self.folders[folder.identifier] = folder
+            for i in range(folder.number_of_sub_folders):
+                try:
+                    index(folder.get_sub_folder(i))
+                except OSError:
+                    pass
+        index(self.f.get_root_folder())
+
+    def folder(self, node):
+        return self.folders.get(node.identifier)
+
+    def item(self, folder, i):
+        """(Message, props loader), or (None, None) for a hidden system item."""
+        item = folder.get_sub_message(i)
+        if not isinstance(item, pypff.message):
+            return None, None
+        return read_message(item), lambda: read_props(item, self.name_map)
+
+    def close(self):
+        self.f.close()
+
+
+class _MboxReader:
+    """Messages of mbox files; a folder node's identifier is its file."""
+
+    def folder(self, node):
+        return node.identifier if isinstance(node.identifier, str) else None
+
+    def item(self, file, i):
+        return parse_message(read_raw(file, i)), None
+
+    def close(self):
+        pass
+
+
 def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
             outlook_writer=None):
     """Copy mail, appointments and contacts from the selected FolderNodes
@@ -247,35 +310,25 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     # Outlook locks the OST of its own profile as soon as it starts, and we
     # start Outlook to write the PST. So read such files from a copy taken
     # before Outlook starts.
+    mbox = is_mbox_source(ost_path)
     read_path, temp_dir = ost_path, None
-    if is_outlook_data_file(ost_path):
+    if not mbox and is_outlook_data_file(ost_path):
         if progress:
             progress(0, total, "Making a working copy of the OST…")
         read_path, temp_dir = _working_copy(ost_path)
 
-    f = writer = None
+    reader = writer = None
     done = 0
     try:
         # Folder kind for every path, so parents of a calendar or contacts
         # folder are created with the right type too
         kinds_by_path = {n.path: n.kind for top in scan_folders(read_path) for n in top.walk()}
-        f = open_file(read_path)
-        name_map = load_name_map(f)
-        writer = outlook_writer or PstWriter(
-            pst_path, display_name=os.path.splitext(os.path.basename(ost_path))[0])
-        folders_by_id = {}
-
-        def index(folder):
-            folders_by_id[folder.identifier] = folder
-            for i in range(folder.number_of_sub_folders):
-                try:
-                    index(folder.get_sub_folder(i))
-                except OSError:
-                    pass
-        index(f.get_root_folder())
+        reader = _MboxReader() if mbox else _PffReader(read_path)
+        name = os.path.splitext(os.path.basename(os.path.normpath(ost_path)))[0]
+        writer = outlook_writer or PstWriter(pst_path, display_name=name)
 
         for node in selected:
-            source = folders_by_id.get(node.identifier)
+            source = reader.folder(node)
             label = "/".join(node.path)
             if source is None:
                 result.failures.append(Failure(label, -1, "", "folder could not be opened"))
@@ -288,13 +341,12 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                     return result
                 subject = ""
                 try:
-                    item = source.get_sub_message(i)
-                    if not isinstance(item, pypff.message):
+                    m, load_props = reader.item(source, i)
+                    if m is None:
                         result.skipped += 1
                         result.item_types["(system item)"] += 1
                         result.skipped_types["(system item)"] += 1
                     else:
-                        m = read_message(item)
                         subject = m.subject
                         result.item_types[m.message_class] += 1
                         kind = item_kind(m.message_class)
@@ -311,7 +363,7 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                             if kind == MAIL:
                                 writer.add_message(target, m)
                             else:
-                                writer.add_item(target, item_type[kind], m, read_props(item, name_map))
+                                writer.add_item(target, item_type[kind], m, load_props())
                             result.copied[kind] += 1
                             result.skipped_attached_emails += m.skipped_embedded
                             for w in writer.warnings[warnings_before:]:
@@ -324,8 +376,8 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     finally:
         result.seconds = time.time() - start
         try:
-            if f is not None:
-                f.close()
+            if reader is not None:
+                reader.close()
         finally:
             try:
                 if writer is not None and outlook_writer is None:

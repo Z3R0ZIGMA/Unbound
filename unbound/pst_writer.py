@@ -25,8 +25,10 @@ OL_POST_ITEM = 6  # olPostItem
 OL_APPOINTMENT_ITEM = 1  # olAppointmentItem
 OL_CONTACT_ITEM = 2  # olContactItem
 OL_BY_VALUE = 1  # olByValue
+OL_FORMAT_PLAIN = 1  # olFormatPlain
 OL_FOLDER_CALENDAR = 9  # olFolderCalendar
 OL_FOLDER_CONTACTS = 10  # olFolderContacts
+ATTACH_CONTENT_ID = 0x3712  # PR_ATTACH_CONTENT_ID
 
 # Properties that belong to the source file or that Outlook computes itself;
 # copying them is pointless or harmful. Ids only (any type).
@@ -143,8 +145,18 @@ class PstWriter:
                 fh.write(att.data)
             if att.filename == "ContactPicture.jpg" and hasattr(item, "AddPicture"):
                 item.AddPicture(path)  # shows as the contact's photo
-            else:
-                item.Attachments.Add(path, OL_BY_VALUE, 1, att.filename)
+                continue
+            added = item.Attachments.Add(path, OL_BY_VALUE, 1, att.filename)
+            if att.content_id:
+                # The HTML body shows this image through "cid:<content id>";
+                # without the id the image appears broken. (Outlook decides
+                # itself whether to list it as an attachment: it resets
+                # PR_ATTACHMENT_HIDDEN and refuses PR_ATTACH_FLAGS on save.)
+                try:
+                    added.PropertyAccessor.SetProperty(
+                        mapi.proptag_url(ATTACH_CONTENT_ID, mapi.PT_UNICODE), att.content_id)
+                except Exception as e:
+                    self.property_errors["inline image id"] = str(e).splitlines()[0][:200]
 
     def _copy_props(self, item, props, skip=None):
         """Copy raw properties onto the item; returns (set, failed) counts."""
@@ -344,6 +356,8 @@ class PstWriter:
         if m.html_body:
             post.HTMLBody = m.html_body
         elif m.plain_body:
+            # Keep plain-text mail plain; otherwise Outlook stores it as HTML
+            post.BodyFormat = OL_FORMAT_PLAIN
             post.Body = m.plain_body
 
         with tempfile.TemporaryDirectory(prefix="unbound_") as tmp:

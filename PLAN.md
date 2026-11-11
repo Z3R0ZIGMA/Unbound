@@ -41,10 +41,10 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 
 ## Later additions
 
-- Contacts and calendar items
+- ~~Contacts and calendar items~~ Done in version 1.1 (see below)
 - Date range filters
 - Splitting very large PSTs
-- Apple Mail (Mac) MBOX to PST conversion: read MBOX with Python's built-in `mailbox` module, reuse the Outlook Classic writer
+- ~~Apple Mail (Mac) MBOX to PST conversion~~ Done in version 1.2 (see below)
 
 ## Risks and first steps
 
@@ -77,3 +77,12 @@ A Windows desktop app that converts an Outlook OST file (copied from another mac
 - pywin32 converts naive datetimes from local time to UTC on their way into COM but passes UTC-aware ones unchanged, so all dates are handed over marked UTC.
 - Tested on a real OST: 616/616 appointments (including 64 repeating series with cancelled and changed occurrences) and all contacts identical after conversion.
 - Fixed in passing: the PST was created with `olStoreANSI` (3) instead of `olStoreUnicode` (2), which lost characters outside the Western code page and limited the PST to 2 GB; hidden attachments (a series' changed occurrences) and attached emails were copied as broken files.
+
+## Version 1.2: Apple Mail (MBOX)
+
+- Opens Apple Mail's "Export Mailbox" output: a folder of `Name.mbox` folders, each holding an `mbox` file, nested for sub-mailboxes. A single mbox file works too.
+- Messages are split on `From ` lines (with mboxrd `>From` quoting undone), parsed with Python's `email` package into the same `Message` record as the OST reader, and written by the same PST writer. Attached emails (`message/rfc822`) become `.eml` attachments.
+- Inline images keep their content ID so the HTML shows them. Outlook ignores attempts to set `PR_ATTACHMENT_HIDDEN` (reset on save) and refuses `PR_ATTACH_FLAGS`, so it decides itself whether to list them.
+- Plain-text mail is now saved as plain text (`BodyFormat = olFormatPlain`); before, Outlook turned it into HTML and the PST had no plain body.
+- Fixed a regression from 1.1: hidden attachments were all skipped, which dropped the inline images of OST emails; now only hidden embedded items (a repeating appointment's changed occurrences) are skipped.
+- Tested end to end with a generated export (`scripts/mbox_test.py`): emoji and encoded subjects, HTML with inline image, attachments, Cc, read/unread, nested mailboxes; all checks pass. Not yet tested with a real export from a Mac.

@@ -45,6 +45,7 @@ Every line should start with `OK`.
 | `unbound/app.py` | The window (PySide6, dark theme; colours are in `COLORS` at the top) |
 | `unbound/converter.py` | Folder scan and the OST → PST conversion loop, log writing |
 | `unbound/ost_reader.py` | Reads messages out of the OST with pypff |
+| `unbound/mbox_reader.py` | Finds the mailboxes in an Apple Mail export and reads MBOX messages |
 | `unbound/pst_writer.py` | Writes mail, appointments and contacts into the PST through Outlook |
 | `unbound/props.py` | Reads every property of an item, resolving named properties via the file's name-to-ID map |
 | `unbound/appointment.py` | Decodes recurrence patterns and time zones, which Outlook only accepts through its object model |
@@ -52,4 +53,6 @@ Every line should start with `OK`.
 | `scripts/list_folders.py` | Command-line check: prints an OST's folder tree and test-reads items |
 | `scripts/copy_one_message.py` | Command-line check: copies one message to a PST and compares every field |
 | `scripts/copy_items_test.py` | Command-line check: copies sample appointments and a contact to a PST and compares every property and the recurrence |
+| `scripts/make_mbox_fixture.py` | Builds a test Apple Mail export covering the tricky cases |
+| `scripts/mbox_test.py` | End-to-end MBOX check: builds the test export, converts it and verifies every message |
 | `assets/make_icon.py` | Draws the app icon; re-run it after changing the colours, then rebuild |

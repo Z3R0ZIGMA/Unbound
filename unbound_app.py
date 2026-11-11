@@ -12,7 +12,8 @@ def self_check(report_path):
     lines, ok = [], True
     for name in ("pypff", "pythoncom", "pywintypes", "win32com.client",
                  "PySide6.QtWidgets", "unbound.app", "unbound.converter",
-                 "unbound.pst_writer", "unbound.props", "unbound.appointment"):
+                 "unbound.pst_writer", "unbound.props", "unbound.appointment",
+                 "unbound.mbox_reader"):
         try:
             mod = __import__(name, fromlist=["_"])
             extra = f" {mod.get_version()}" if name == "pypff" else ""

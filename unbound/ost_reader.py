@@ -20,6 +20,7 @@ class Recipient:
 class Attachment:
     filename: str
     data: bytes
+    content_id: str | None = None  # set for images shown inside HTML (cid: links)
 
 
 @dataclass
@@ -45,6 +46,7 @@ class Message:
 ATTACH_METHOD = 0x3705
 ATTACH_EMBEDDED_MSG = 5
 ATTACHMENT_HIDDEN = 0x7FFE
+ATTACH_CONTENT_ID = 0x3712
 
 
 class OstInUseError(OSError):
@@ -154,15 +156,22 @@ def read_message(msg):
         except (OSError, IndexError):
             att_props = {}
         hidden = att_props.get(ATTACHMENT_HIDDEN)
-        if hidden is not None and hidden.data and hidden.data[0]:
-            continue  # e.g. a changed occurrence of a repeating appointment
+        is_hidden = hidden is not None and hidden.data and hidden.data[0]
         if _integer(att_props, ATTACH_METHOD) == ATTACH_EMBEDDED_MSG:
-            skipped_embedded += 1
+            # Hidden embedded items are a repeating appointment's changed
+            # occurrences (recreated from the recurrence data); visible ones
+            # are attached emails, which can't be recreated yet
+            if not is_hidden:
+                skipped_embedded += 1
             continue
+        # Other hidden attachments (usually images shown inside an HTML
+        # email) are kept; the writer hides them again via their content id
         size = a.size or 0
         data = a.read_buffer(size) if size else b""
         name = _optional(lambda: a.long_filename) or f"attachment_{i + 1}"
-        attachments.append(Attachment(filename=name, data=data))
+        cid = _string(att_props, ATTACH_CONTENT_ID)
+        attachments.append(Attachment(filename=name, data=data,
+                                      content_id=cid.strip().strip("<>") if cid else None))
 
     plain = _optional(lambda: msg.plain_text_body)
     return Message(

@@ -8,11 +8,12 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QTreeWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .converter import CALENDAR, CONTACTS, MAIL, convert, scan_folders, write_log
+from .mbox_reader import is_mbox_source
 from .ost_reader import OstInUseError
 
 APP_NAME = "Unbound"
@@ -101,11 +102,20 @@ class ScanWorker(QObject):
 
     def run(self):
         try:
-            self.done.emit(scan_folders(self.path))
+            if os.path.isdir(self.path) and not is_mbox_source(self.path):
+                self.failed.emit("No Apple Mail mailboxes were found in this folder.\n\n"
+                                 "Choose the folder you exported to from Apple Mail "
+                                 "(it contains folders ending in .mbox), or one .mbox folder.")
+                return
+            nodes = scan_folders(self.path)
+            if not nodes:
+                self.failed.emit("No folders or mailboxes were found here.")
+                return
+            self.done.emit(nodes)
         except OstInUseError as e:
             self.failed.emit(str(e))
         except Exception as e:
-            self.failed.emit("This file couldn't be opened as an Outlook data file.\n\n"
+            self.failed.emit("This couldn't be opened as an Outlook data file or an MBOX export.\n\n"
                              + str(e).splitlines()[0][:400])
 
 
@@ -165,7 +175,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel(APP_NAME)
         title.setObjectName("title")
-        subtitle = QLabel("Convert an Outlook OST file into a PST")
+        subtitle = QLabel("Convert an Outlook OST or an Apple Mail export (MBOX) into a PST")
         subtitle.setObjectName("muted")
         lay.addWidget(title)
         lay.addWidget(subtitle)
@@ -174,9 +184,13 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("Choose an OST file…")
+        self.path_edit.setPlaceholderText("Choose an OST file or an Apple Mail export…")
         self.browse_btn = QPushButton("Browse…")
-        self.browse_btn.clicked.connect(self.choose_file)
+        menu = QMenu(self.browse_btn)
+        menu.addAction("Outlook data file (OST or PST)…", self.choose_file)
+        menu.addAction("Apple Mail export folder…", self.choose_mbox_folder)
+        menu.addAction("Single MBOX file…", self.choose_mbox_file)
+        self.browse_btn.setMenu(menu)
         row.addWidget(self.path_edit, 1)
         row.addWidget(self.browse_btn)
         lay.addLayout(row)
@@ -225,6 +239,20 @@ class MainWindow(QMainWindow):
         self.update_controls()
 
     # ---------- file and tree ----------
+
+    def choose_mbox_folder(self):
+        # Apple Mail's Export Mailbox writes "Name.mbox" folders; pick either
+        # one of those or the folder they were exported into
+        path = QFileDialog.getExistingDirectory(
+            self, "Choose the Apple Mail export folder (or one .mbox folder)")
+        if path:
+            self.load_file(path)
+
+    def choose_mbox_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose an MBOX file", "", "MBOX files (*.mbox mbox);;All files (*)")
+        if path:
+            self.load_file(path)
 
     def choose_file(self):
         start = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
@@ -348,8 +376,11 @@ class MainWindow(QMainWindow):
         nodes = self.selected_nodes()
         if not nodes:
             return
+        base = os.path.basename(os.path.normpath(self.ost_path))
+        if base == "mbox":  # the data file inside an Apple .mbox folder
+            base = os.path.basename(os.path.dirname(self.ost_path))
         default = os.path.join(os.path.expanduser("~"), "Documents",
-                               os.path.splitext(os.path.basename(self.ost_path))[0] + ".pst")
+                               os.path.splitext(base)[0] + ".pst")
         pst, _ = QFileDialog.getSaveFileName(self, "Save PST as", default,
                                              "Outlook data file (*.pst)")
         if not pst:
