@@ -12,7 +12,7 @@ Download **`Unbound.exe`** from the [latest release](https://github.com/Z3R0ZIGM
 Get-FileHash Unbound.exe
 ```
 
-The result should match the line in `SHA256SUMS.txt` on the release page (releases from 1.3.0 on have one).
+The result should match the line in `SHA256SUMS.txt` on the release page (releases from 1.3.1 on have one).
 
 To build it yourself instead, see [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe).
 

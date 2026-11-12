@@ -7,7 +7,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from unbound import app as ui  # noqa: E402
@@ -49,10 +49,21 @@ class Window(unittest.TestCase):
 
     def setUp(self):
         self.win = ui.MainWindow()
-        self.addCleanup(self.win.close)
+        self.addCleanup(self.dispose)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = tmp.name
+
+    def dispose(self):
+        # Destroy the window now. Left to the end of the run, Qt objects are
+        # torn down in no particular order as Python exits, which can crash
+        # the test process after every test has passed.
+        self.win.thread = self.win.worker = None
+        self.win.close()
+        self.win.deleteLater()
+        del self.win
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        QApplication.processEvents()
 
     def load(self):
         self.win.ost_path = os.path.join(self.dir, "mail.ost")

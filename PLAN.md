@@ -8,7 +8,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - an **Apple Mail** export (MBOX), for moving from a Mac to Windows
 - an existing **PST**, to upgrade an old ANSI-format PST to Unicode or copy only some of its folders
 
-## Features (current: 1.3.0)
+## Features (current: 1.3.1)
 
 - Open an OST, a PST, or an Apple Mail export folder (Browse, or drop it on the window)
 - Preview the folder tree with item counts; mail, calendar and contacts folders are ticked by default, system folders and shared mailboxes are not
@@ -75,7 +75,8 @@ Next candidates:
 - **1.0.0:** mail from OST to PST (Exchange/Microsoft 365 and IMAP OSTs)
 - **1.1.0:** calendar and contacts; PSTs created as Unicode (1.0.0 made ANSI PSTs)
 - **1.2.0:** Apple Mail (MBOX); inline images in OST emails kept again; plain-text and rich-text mail keep their format; repeating meetings in other time zones fixed; new title, logo and Browse menu
-- **1.3.0:** safety and reliability; see "Version 1.3" below
+- **1.3.1:** the first published build of 1.3. The 1.3.0 tag has no release: all its tests passed, but the test process crashed as it exited (windows left over from the tests), which stopped the build. Only the tests changed
+- **1.3.0:** safety and reliability; see "Version 1.3" below (tagged, not published)
 - **1.2.1:** fixes the EXE (1.1.0 and 1.2.0): calendar items failed with "No module named 'win32timezone'" and emails got the conversion date as their received date, because PyInstaller left out a module pywin32 loads on demand. The self-check now passes a date through COM, the log lists refused properties, and `Unbound.exe --convert` lets the EXE itself be tested end to end
 
 ## Risks and first steps
