@@ -5,6 +5,7 @@ Copies mail (IPM.Note*), appointments (IPM.Appointment*) and contacts
 types are skipped and counted in the log.
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -14,11 +15,15 @@ from dataclasses import dataclass, field
 
 import pypff
 
+from . import __version__
 from .mbox_reader import find_mailboxes, is_mbox_source, message_offsets, parse_message, read_raw
 from .ost_reader import OstInUseError, is_lock_error, open_file, read_message
 from .props import load_name_map, read_props
 
 MAIL, CALENDAR, CONTACTS = "mail", "calendar", "contacts"
+
+# Outlook stops writing to a PST at 50 GB unless its limit has been raised
+PST_SIZE_LIMIT = 50 * 2**30
 
 # Hidden system folders that hold no user mail; unticked by default
 SYSTEM_FOLDERS = {
@@ -95,13 +100,14 @@ def _container_class(folder):
     return None
 
 
-def _scan(folder, path):
+def _scan(folder, path, name=None):
     try:
         count = folder.number_of_sub_messages
     except OSError:
         count = 0
-    node = FolderNode(folder.identifier, folder.name or "", path, count,
-                      _container_class(folder))
+    if name is None:
+        name = folder.name or ""
+    node = FolderNode(folder.identifier, name, path, count, _container_class(folder))
     try:
         n_sub = folder.number_of_sub_folders
     except OSError:
@@ -111,7 +117,10 @@ def _scan(folder, path):
             sub = folder.get_sub_folder(i)
         except OSError:
             continue
-        node.children.append(_scan(sub, path + ((sub.name or f"Folder {i + 1}"),)))
+        # Outlook can't create a folder without a name, so a nameless one
+        # gets a name here that the tree and the PST then both use
+        sub_name = sub.name if (sub.name or "").strip() else f"Folder {i + 1}"
+        node.children.append(_scan(sub, path + (sub_name,), sub_name))
     return node
 
 
@@ -158,7 +167,12 @@ def scan_folders(path):
     """Top-level folders of an OST/PST or an Apple Mail / MBOX export."""
     if is_mbox_source(path):
         return _scan_mbox(path)
-    return _scan_pff(path)
+    from .pff_process import PffProcess
+    reader = PffProcess(path)
+    try:
+        return reader.scan()
+    finally:
+        reader.close()
 
 
 def _scan_mbox(path):
@@ -172,8 +186,9 @@ def _scan_mbox(path):
     return [node(b) for b in find_mailboxes(path)]
 
 
-def _scan_pff(ost_path):
-    """Return the top-level folders to show, as Outlook would.
+def _visible_tree(raw):
+    """The top-level folders to show, as Outlook would, from the raw tree
+    of the whole file.
 
     An Exchange OST keeps the user's folders under Root - Mailbox/IPM_SUBTREE
     and cached shared mailboxes under Root - Mailbox/Shared Data. IMAP OSTs
@@ -181,12 +196,6 @@ def _scan_pff(ost_path):
     folder's contents become the top level of the output PST; the rest is
     internal Outlook data.
     """
-    f = open_file(ost_path)
-    try:
-        raw = _scan(f.get_root_folder(), ())
-    finally:
-        f.close()
-
     mailbox = _child(raw, "Root - Mailbox")
     ipm = mailbox and _child(mailbox, "IPM_SUBTREE")
     if not ipm:
@@ -219,6 +228,7 @@ class Result:
     failures: list = field(default_factory=list)
     warnings: list = field(default_factory=list)  # items copied only partly
     cancelled: bool = False
+    stopped: str = ""  # why the run ended early by itself (the source became unreadable)
     seconds: float = 0.0
     skipped_attached_emails: int = 0
     # Diagnostics for the log: what kinds of folders and items were met
@@ -244,31 +254,52 @@ def item_kind(message_class):
 
 
 class _PffReader:
-    """Items of an OST/PST through pypff."""
+    """An OST/PST through pypff. Lives in the reader process (pff_process),
+    not in the window's own process, so a crash in libpff can't take the
+    window down."""
 
     def __init__(self, path):
         self.f = open_file(path)
-        self.name_map = load_name_map(self.f)
-        self.folders = {}
+        self.name_map = None
+        self.folders = None
 
-        def index(folder):
-            self.folders[folder.identifier] = folder
-            for i in range(folder.number_of_sub_folders):
-                try:
-                    index(folder.get_sub_folder(i))
-                except OSError:
-                    pass
-        index(self.f.get_root_folder())
+    def scan(self):
+        return _visible_tree(_scan(self.f.get_root_folder(), ()))
 
-    def folder(self, node):
-        return self.folders.get(node.identifier)
+    def _folder(self, identifier):
+        if self.folders is None:
+            self.folders = {}
 
-    def item(self, folder, i):
-        """(Message, props loader), or (None, None) for a hidden system item."""
+            def index(folder):
+                self.folders[folder.identifier] = folder
+                for i in range(folder.number_of_sub_folders):
+                    try:
+                        index(folder.get_sub_folder(i))
+                    except OSError:
+                        pass
+            index(self.f.get_root_folder())
+        return self.folders.get(identifier)
+
+    def has_folder(self, identifier):
+        return self._folder(identifier) is not None
+
+    def read(self, identifier, i):
+        """(Message, properties) of item i in a folder. (None, None) for a
+        hidden system item; properties only for calendar items and contacts,
+        which are the ones recreated from them."""
+        folder = self._folder(identifier)
+        if folder is None:
+            raise LookupError("folder could not be opened")
         item = folder.get_sub_message(i)
         if not isinstance(item, pypff.message):
             return None, None
-        return read_message(item), lambda: read_props(item, self.name_map)
+        m = read_message(item)
+        props = None
+        if item_kind(m.message_class) in (CALENDAR, CONTACTS):
+            if self.name_map is None:
+                self.name_map = load_name_map(self.f)
+            props = read_props(item, self.name_map)
+        return m, props
 
     def close(self):
         self.f.close()
@@ -287,15 +318,173 @@ class _MboxReader:
         pass
 
 
+# ---------- a run's temporary files, and cleaning up after a crash ----------
+
+RUN_MARKER = "unbound-run.json"
+
+
+class _Run:
+    """A conversion's own temporary folder, for the working copy of the OST
+    and attachments on their way into Outlook.
+
+    The marker file in it stays open for as long as the conversion runs.
+    Windows won't let an open file be renamed, so the next start can tell a
+    run that crashed (the marker can be renamed) from one still going in
+    another window (it can't), and clean up only the first.
+    """
+
+    def __init__(self, pst_path):
+        self.dir = tempfile.mkdtemp(prefix="unbound_")
+        self._marker = open(os.path.join(self.dir, RUN_MARKER), "w", encoding="utf-8")
+        json.dump({"pst": os.path.abspath(pst_path), "version": __version__,
+                   "started": time.strftime("%Y-%m-%d %H:%M:%S")}, self._marker)
+        self._marker.flush()
+
+    def close(self):
+        self._marker.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def recover_interrupted():
+    """Clean up after conversions that didn't end normally (a crash, a power
+    cut, a forced close).
+
+    Deletes their temporary folders, which can hold a full copy of the
+    mailbox, and returns the PST files they were writing. Those may still be
+    attached to the Outlook profile: detach them with
+    pst_writer.detach_stores, or pass them to convert() as `detach`.
+    """
+    stale = []
+    root = tempfile.gettempdir()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return stale
+    for name in names:
+        folder = os.path.join(root, name)
+        marker = os.path.join(folder, RUN_MARKER)
+        dead = marker + ".dead"
+        if not name.startswith("unbound_"):
+            continue
+        newly_found = not os.path.exists(dead)
+        if newly_found:
+            if not os.path.isfile(marker):
+                continue  # not a run folder of ours
+            try:
+                os.replace(marker, dead)
+            except OSError:
+                continue  # still open, so that conversion is still running
+        if newly_found:
+            try:
+                with open(dead, encoding="utf-8") as fh:
+                    pst = json.load(fh).get("pst")
+                if isinstance(pst, str) and pst:
+                    stale.append(pst)
+            except (OSError, ValueError, AttributeError):
+                pass
+        # A file in it may be briefly held (a virus scanner on the copy);
+        # the renamed marker gets the folder another try next time
+        shutil.rmtree(folder, ignore_errors=True)
+    return stale
+
+
+class _Cancelled(Exception):
+    """The user cancelled during a setup step."""
+
+
+COPY_CHUNK = 8 * 2**20
+
+
+def _copy_file(source, target, on_progress=None, should_cancel=None):
+    """Copy a file in pieces, so a big one shows progress and can be cancelled."""
+    size = os.path.getsize(source)
+    copied = 0
+    with open(source, "rb") as fin, open(target, "wb") as fout:
+        while True:
+            if should_cancel and should_cancel():
+                raise _Cancelled()
+            chunk = fin.read(COPY_CHUNK)
+            if not chunk:
+                break
+            fout.write(chunk)
+            copied += len(chunk)
+            if on_progress:
+                on_progress(copied, size)
+
+
+def is_outlook_data_file(path):
+    """True for files in Outlook's own data folder, i.e. ones a profile on
+    this PC may be using. OSTs copied from elsewhere are read in place."""
+    folder = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
+    p = os.path.normcase(os.path.abspath(path))
+    return p.startswith(os.path.normcase(os.path.abspath(folder)) + os.sep)
+
+
+def _working_copy(path, folder, on_progress=None, should_cancel=None):
+    """Copy the OST into `folder` (the run's temporary folder); returns the copy."""
+    size = os.path.getsize(path)
+    free = shutil.disk_usage(folder).free
+    if free < size * 1.05:
+        raise RuntimeError(
+            f"Not enough free space for a working copy of the OST: it needs "
+            f"{size / 2**30:.1f} GB in {folder}, and {free / 2**30:.1f} GB is free.")
+    copy = os.path.join(folder, os.path.basename(path))
+    # A running Outlook locks parts of its OST only briefly (e.g. while
+    # syncing), so retry a few times before asking the user to close it
+    for attempt in range(4):
+        try:
+            _copy_file(path, copy, on_progress, should_cancel)
+            return copy
+        except OSError as e:
+            locked = isinstance(e, PermissionError) or is_lock_error(e)
+            if locked and attempt < 3:
+                time.sleep(2)
+                continue
+            if locked:
+                raise OstInUseError(os.path.abspath(path)) from e
+            raise
+
+
+def _copy_reporter(progress, total):
+    """Progress of the working copy, as a status line that changes once per percent."""
+    last = [-1]
+
+    def report(copied, size):
+        percent = min(99, copied * 100 // size) if size else 99
+        if percent != last[0]:
+            last[0] = percent
+            progress(0, total, f"Making a working copy of the OST… {percent}%")
+    return report
+
+
+def estimated_pst_size(source, selected, all_nodes):
+    """Roughly how big the PST will be, in bytes: the source's size scaled
+    by the share of its items that are selected."""
+    try:
+        if is_mbox_source(source):
+            return sum(os.path.getsize(n.identifier) for n in selected
+                       if isinstance(n.identifier, str) and n.item_count)
+        everything = sum(n.item_count for n in all_nodes)
+        if not everything:
+            return 0
+        return int(os.path.getsize(source) * sum(n.item_count for n in selected) / everything)
+    except OSError:
+        return 0
+
+
 def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
-            outlook_writer=None):
+            outlook_writer=None, detach=()):
     """Copy mail, appointments and contacts from the selected FolderNodes
     of ost_path into a new PST.
 
-    progress(done, total, folder_path) is called after each item.
+    progress(done, total, folder_path) is called after each item, and with
+    done = 0 and a status text during setup steps.
     should_cancel() is polled between items.
     outlook_writer lets tests inject a writer; normally a PstWriter is made.
+    detach lists PST files an interrupted conversion may have left attached
+    to Outlook (see recover_interrupted); they're detached first.
     """
+    from .pff_process import PffProcess, ReaderLost
     from .pst_writer import (
         OL_APPOINTMENT_ITEM, OL_CONTACT_ITEM, OL_FOLDER_CALENDAR, OL_FOLDER_CONTACTS, PstWriter,
     )
@@ -308,31 +497,45 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     for n in selected:
         result.folder_types[n.container_class or "(none)"] += 1
 
-    # Outlook locks the OST of its own profile as soon as it starts, and we
-    # start Outlook to write the PST. So read such files from a copy taken
-    # before Outlook starts.
     mbox = is_mbox_source(ost_path)
-    read_path, temp_dir = ost_path, None
-    if not mbox and is_outlook_data_file(ost_path):
-        if progress:
-            progress(0, total, "Making a working copy of the OST…")
-        read_path, temp_dir = _working_copy(ost_path)
-
     reader = writer = None
     done = 0
+    run = _Run(pst_path)
     try:
+        # Outlook locks the OST of its own profile as soon as it starts, and we
+        # start Outlook to write the PST. So read such files from a copy taken
+        # before Outlook starts.
+        read_path = ost_path
+        if not mbox and is_outlook_data_file(ost_path):
+            if progress:
+                progress(0, total, "Making a working copy of the OST…")
+            read_path = _working_copy(ost_path, run.dir,
+                                      progress and _copy_reporter(progress, total), should_cancel)
+
+        if mbox:
+            reader, tree = _MboxReader(), _scan_mbox(read_path)
+        else:
+            reader = PffProcess(read_path)
+            tree = reader.scan()
         # Folder kind for every path, so parents of a calendar or contacts
         # folder are created with the right type too
-        kinds_by_path = {n.path: n.kind for top in scan_folders(read_path) for n in top.walk()}
-        reader = _MboxReader() if mbox else _PffReader(read_path)
+        kinds_by_path = {n.path: n.kind for top in tree for n in top.walk()}
         name = os.path.splitext(os.path.basename(os.path.normpath(ost_path)))[0]
-        writer = outlook_writer or PstWriter(pst_path, display_name=name)
+        writer = outlook_writer or PstWriter(pst_path, display_name=name,
+                                             temp_dir=run.dir, detach=detach)
 
         for node in selected:
             if not node.item_count:
                 continue  # nothing to copy (e.g. an Apple mailbox that only holds others)
-            source = reader.folder(node)
             label = "/".join(node.path)
+            try:
+                source = reader.folder(node)
+            except ReaderLost as e:
+                result.failures.append(Failure(label, -1, "", str(e)))
+                result.stopped = str(e)
+                return result
+            except Exception:
+                source = None
             if source is None:
                 result.failures.append(Failure(label, -1, "", "folder could not be opened"))
                 done += node.item_count
@@ -371,11 +574,17 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                             result.skipped_attached_emails += m.skipped_embedded
                             for w in writer.warnings[warnings_before:]:
                                 result.warnings.append(Failure(label, i, subject, w))
+                except ReaderLost as e:  # the source can't be read any more: stop here
+                    result.failures.append(Failure(label, i, subject, str(e)))
+                    result.stopped = str(e)
+                    return result
                 except Exception as e:  # one bad item must not stop the run
                     result.failures.append(Failure(label, i, subject, str(e).splitlines()[0][:300]))
                 done += 1
                 if progress:
                     progress(done, total, label)
+    except _Cancelled:
+        result.cancelled = True
     finally:
         result.seconds = time.time() - start
         try:
@@ -388,52 +597,31 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 if writer is not None and outlook_writer is None:
                     writer.close()  # always detach the PST from the profile
             finally:
-                if temp_dir:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
+                run.close()
     return result
 
 
-def is_outlook_data_file(path):
-    """True for files in Outlook's own data folder, i.e. ones a profile on
-    this PC may be using. OSTs copied from elsewhere are read in place."""
-    folder = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
-    p = os.path.normcase(os.path.abspath(path))
-    return p.startswith(os.path.normcase(os.path.abspath(folder)) + os.sep)
+def log_path_for(pst_path):
+    return os.path.splitext(pst_path)[0] + " - Unbound log.txt"
 
 
-def _working_copy(path):
-    size = os.path.getsize(path)
-    temp_dir = tempfile.mkdtemp(prefix="unbound_")
-    free = shutil.disk_usage(temp_dir).free
-    if free < size * 1.05:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(
-            f"Not enough free space for a working copy of the OST: it needs "
-            f"{size / 2**30:.1f} GB in {temp_dir}, and {free / 2**30:.1f} GB is free.")
-    copy = os.path.join(temp_dir, os.path.basename(path))
-    # A running Outlook locks parts of its OST only briefly (e.g. while
-    # syncing), so retry a few times before asking the user to close it
-    for attempt in range(4):
-        try:
-            shutil.copyfile(path, copy)
-            return copy, temp_dir
-        except OSError as e:
-            locked = isinstance(e, PermissionError) or is_lock_error(e)
-            if locked and attempt < 3:
-                time.sleep(2)
-                continue
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            if locked:
-                raise OstInUseError(os.path.abspath(path)) from e
-            raise
+def write_failure_log(error, ost_path, pst_path, log_path):
+    """The log for a conversion that couldn't start or broke off with an error."""
+    with open(log_path, "w", encoding="utf-8") as fh:
+        fh.write(f"Unbound {__version__} conversion log\n")
+        fh.write(f"Source: {ost_path}\nOutput: {pst_path}\n")
+        fh.write(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        fh.write(f"Conversion failed: {error}\n")
 
 
 def write_log(result, ost_path, pst_path, log_path):
     with open(log_path, "w", encoding="utf-8") as fh:
-        fh.write("Unbound conversion log\n")
+        fh.write(f"Unbound {__version__} conversion log\n")
         fh.write(f"Source: {ost_path}\nOutput: {pst_path}\n")
         fh.write(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                  f"{'  (cancelled)' if result.cancelled else ''}\n")
+        if result.stopped:
+            fh.write(f"Stopped early: {result.stopped}\n")
         fh.write(f"Copied: {result.total_copied} (mail {result.copied[MAIL]}, "
                  f"calendar {result.copied[CALENDAR]}, contacts {result.copied[CONTACTS]})\n")
         fh.write(f"Skipped (tasks, notes, contact groups, meeting requests and other "

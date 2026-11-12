@@ -6,6 +6,7 @@ never "unsent"), then given the original sender, times and recipients via
 PropertyAccessor and re-classed as IPM.Note so it shows as normal mail.
 """
 
+import gc
 import os
 import re
 import tempfile
@@ -16,6 +17,7 @@ import win32com.client
 from . import appointment as cal
 from . import mapi
 from .props import PT_SYSTIME
+from .timezones import windows_zone
 
 # OlStoreType: olStoreDefault = 1, olStoreUnicode = 2, olStoreANSI = 3.
 # Must be Unicode: ANSI (Outlook 97-2002) PSTs lose characters outside the
@@ -85,16 +87,83 @@ def from_com_date(value):
     return value.replace(tzinfo=None) if value is not None else None
 
 
+# Names Windows 10 and earlier treat as devices, whatever the extension:
+# a file called "nul.txt" would be written to nowhere
+_DEVICE_NAMES = ({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+                 | {f"{port}{n}" for port in ("COM", "LPT") for n in range(1, 10)})
+
+
 def _safe_filename(name):
+    """A name safe to write in a temporary folder. Outlook takes the
+    attachment's file name from it, so the extension is kept."""
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
-    return name[:150] or "attachment"
+    stem, ext = os.path.splitext(name)
+    if len(name) > 150 and stem and len(ext) <= 20:
+        name = stem[:150 - len(ext)].rstrip(" .") + ext
+    name = name[:150] or "attachment"
+    if name.split(".")[0].strip().upper() in _DEVICE_NAMES:
+        name = "_" + name
+    return name
+
+
+def _is_smtp(address):
+    return bool(address) and "@" in address and not address.startswith("/")
+
+
+def recipient_text(name, email):
+    """(text for Recipients.Add, whether Outlook should resolve it).
+
+    With an internet address Outlook is given '"Name" <address>' and told to
+    resolve it, which is what makes it store the address. Without one (only
+    a name, or an Exchange directory address) just the name is stored:
+    resolving would look it up in *this* PC's address book and could quietly
+    put in a different person who happens to match.
+    """
+    # A quote inside the name would end the quoted part early
+    name = re.sub(r"[\x00-\x1f\x7f]+", " ", name or "").replace('"', "'").strip()
+    email = (email or "").strip()
+    if _is_smtp(email):
+        return (f'"{name}" <{email}>' if name else email), True
+    return (name or email or None), False
+
+
+def _detach(ns, paths):
+    """Detach these PST files from the Outlook profile where they're
+    attached (the files stay on disk). Returns the paths that were."""
+    want = {os.path.normcase(os.path.abspath(p)) for p in paths}
+    removed = []
+    if not want:
+        return removed
+    for store in list(ns.Stores):
+        try:
+            path = store.FilePath
+            if path and os.path.normcase(os.path.abspath(path)) in want:
+                ns.RemoveStore(store.GetRootFolder())
+                removed.append(path)
+        except Exception:
+            continue  # a store Outlook won't report on, or won't let go of
+    return removed
+
+
+def detach_stores(paths):
+    """Detach PST files that a conversion which was interrupted left attached
+    to Outlook. Starts Outlook if it isn't running."""
+    ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    try:
+        return _detach(ns, paths)
+    finally:
+        del ns
+        gc.collect()
 
 
 class PstWriter:
-    def __init__(self, pst_path, display_name=None):
+    def __init__(self, pst_path, display_name=None, temp_dir=None, detach=()):
         self.pst_path = os.path.abspath(pst_path)
+        self.temp_dir = temp_dir  # where attachments are staged; None = the system's
         self.app = win32com.client.Dispatch("Outlook.Application")
         self.ns = self.app.GetNamespace("MAPI")
+        if detach:
+            _detach(self.ns, detach)
         self.ns.AddStoreEx(self.pst_path, OL_STORE_UNICODE)
         self.store = self._find_store()
         self.root = self.store.GetRootFolder()
@@ -134,6 +203,27 @@ class PstWriter:
                 existing = folder.Folders.Add(name, ftype) if ftype else folder.Folders.Add(name)
             folder = existing
         return folder
+
+    def _staging(self):
+        """A temporary folder for one item's attachments, inside the run's
+        own folder when there is one (short name there: paths have a limit)."""
+        return tempfile.TemporaryDirectory(
+            prefix="unbound_" if self.temp_dir is None else "a", dir=self.temp_dir)
+
+    def _add_recipients(self, item, recipients, label):
+        for r in recipients:
+            text, resolve = recipient_text(r.name, r.email)
+            if not text:
+                continue
+            try:
+                rec = item.Recipients.Add(text)
+                rec.Type = r.kind
+                if resolve:
+                    # Without this Outlook stores the raw text as the display
+                    # name and leaves the email address empty
+                    rec.Resolve()
+            except Exception as e:
+                self.property_errors[label] = str(e)
 
     def _add_attachments(self, item, attachments, tmp):
         for i, att in enumerate(attachments):
@@ -182,11 +272,17 @@ class PstWriter:
         name = cal.tz_key_name(blob)
         if not name:
             return None
-        try:
-            return self.app.TimeZones.Item(name)
-        except Exception:
-            self.warnings.append(f"time zone '{name}' not known to this PC")
-            return None
+        # Outlook knows Windows zone names; phones and Google Calendar write
+        # IANA ones ("America/New_York"), which Windows can translate
+        for candidate in (name, windows_zone(name)):
+            if not candidate:
+                continue
+            try:
+                return self.app.TimeZones.Item(candidate)
+            except Exception:
+                continue
+        self.warnings.append(f"time zone '{name}' not known to this PC")
+        return None
 
     def _to_pc_local(self, dt, tz):
         """A time in the appointment's own zone -> this PC's local time."""
@@ -301,17 +397,9 @@ class PstWriter:
         elif m.plain_body:
             item.Body = m.plain_body
         if kind == OL_APPOINTMENT_ITEM:
-            for r in m.recipients:  # attendees; saving never sends anything
-                addr = f'"{r.name}" <{r.email}>' if r.name and r.email else (r.email or r.name)
-                if not addr:
-                    continue
-                try:
-                    rec = item.Recipients.Add(addr)
-                    rec.Type = r.kind
-                    rec.Resolve()
-                except Exception as e:
-                    self.property_errors["attendees"] = str(e)
-        with tempfile.TemporaryDirectory(prefix="unbound_") as tmp:
+            # attendees; saving never sends anything
+            self._add_recipients(item, m.recipients, "attendees")
+        with self._staging() as tmp:
             self._add_attachments(item, m.attachments, tmp)
             self._copy_props(item, props, skip)
             tz = self._set_times(item, a) if is_appt else None
@@ -346,17 +434,23 @@ class PstWriter:
     def _set_sender_and_times(self, item, m):
         pa = item.PropertyAccessor
         S, T = mapi.PT_UNICODE, mapi.PT_SYSTIME
+        address = m.sender_email
+        # An Exchange sender whose internet address isn't in the source has
+        # only a directory address ("/o=.../cn=..."). That's type EX, not an
+        # SMTP address, so it mustn't be stored as one.
+        addr_type = ("EX" if address.startswith("/") else "SMTP") if address else None
         for label, pid in (("sender name", mapi.SENDER_NAME),
                            ("sent-representing name", mapi.SENT_REPRESENTING_NAME)):
             self._set(pa, label, pid, S, m.sender_name)
         for label, pid in (("sender address type", mapi.SENDER_ADDRTYPE),
                            ("sent-representing address type", mapi.SENT_REPRESENTING_ADDRTYPE)):
-            self._set(pa, label, pid, S, "SMTP" if m.sender_email else None)
+            self._set(pa, label, pid, S, addr_type)
         for label, pid in (("sender email", mapi.SENDER_EMAIL_ADDRESS),
-                           ("sent-representing email", mapi.SENT_REPRESENTING_EMAIL_ADDRESS),
-                           ("sender SMTP", mapi.SENDER_SMTP_ADDRESS),
+                           ("sent-representing email", mapi.SENT_REPRESENTING_EMAIL_ADDRESS)):
+            self._set(pa, label, pid, S, address)
+        for label, pid in (("sender SMTP", mapi.SENDER_SMTP_ADDRESS),
                            ("sent-representing SMTP", mapi.SENT_REPRESENTING_SMTP_ADDRESS)):
-            self._set(pa, label, pid, S, m.sender_email)
+            self._set(pa, label, pid, S, address if _is_smtp(address) else None)
         self._set(pa, "delivery time", mapi.MESSAGE_DELIVERY_TIME, T, com_date(m.delivery_time))
         self._set(pa, "submit time", mapi.CLIENT_SUBMIT_TIME, T, com_date(m.submit_time))
 
@@ -378,7 +472,7 @@ class PstWriter:
             post.BodyFormat = OL_FORMAT_PLAIN
             post.Body = m.plain_body
 
-        with tempfile.TemporaryDirectory(prefix="unbound_") as tmp:
+        with self._staging() as tmp:
             self._add_attachments(post, m.attachments, tmp)
             post.MessageClass = m.message_class
             post.Save()
@@ -388,18 +482,7 @@ class PstWriter:
         # 2. Reopen it: now it's a MailItem, so it takes real recipients.
         #    Times are set here because the first save overwrites them.
         item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
-        for r in m.recipients:
-            addr = f'"{r.name}" <{r.email}>' if r.name and r.email else (r.email or r.name)
-            if not addr:
-                continue
-            try:
-                rec = item.Recipients.Add(addr)
-                rec.Type = r.kind
-                # Without this Outlook stores the raw text as the display
-                # name and leaves the email address empty
-                rec.Resolve()
-            except Exception as e:
-                self.property_errors["recipients"] = str(e)
+        self._add_recipients(item, m.recipients, "recipients")
         self._set_sender_and_times(item, m)
         item.UnRead = not m.is_read
         item.Save()
@@ -415,5 +498,4 @@ class PstWriter:
             # Drop every COM reference; Outlook keeps the PST open while
             # any are alive.
             self.root = self.store = self.ns = self.app = None
-            import gc
             gc.collect()

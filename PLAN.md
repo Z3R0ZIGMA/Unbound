@@ -8,13 +8,16 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - an **Apple Mail** export (MBOX), for moving from a Mac to Windows
 - an existing **PST**, to upgrade an old ANSI-format PST to Unicode or copy only some of its folders
 
-## Features (current: 1.2.0)
+## Features (current: 1.3.0)
 
-- Open an OST, a PST, or an Apple Mail export folder
+- Open an OST, a PST, or an Apple Mail export folder (Browse, or drop it on the window)
 - Preview the folder tree with item counts; mail, calendar and contacts folders are ticked by default, system folders and shared mailboxes are not
 - Convert mail, calendar (including repeating meetings) and contacts, with a progress bar, time remaining and cancel
 - Save a log next to the PST: what was copied, skipped, copied with warnings or failed, plus the folder and item types found
-- Converts this PC's own (locked) OST from a temporary working copy
+- Converts this PC's own (locked) OST from a temporary working copy, with progress and cancel
+- Looks after the user's files: an existing PST is replaced by way of the Recycle Bin, Outlook's own data folder is refused as a destination, and a PST that probably won't fit (or would pass Outlook's 50 GB limit) is warned about first
+- Cleans up after itself: closing the window stops the conversion properly, and a conversion cut short by a crash is tidied away at the next start
+- Carries on past damaged parts of an OST or PST, listing the affected items in the log
 
 ## Architecture
 
@@ -23,6 +26,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - **OST/PST:** libpff through its Python bindings (pypff), in `unbound/ost_reader.py`. Named properties (most calendar and contact fields) are resolved by decoding the file's name-to-ID map in `unbound/props.py`, because pypff only exposes it as raw data. Recurrence patterns are decoded in `unbound/appointment.py`.
 - **MBOX:** Python's `email` package, in `unbound/mbox_reader.py`. Finds the `Name.mbox` folders of an Apple Mail export and splits each mbox file into messages.
 - Both produce the same `Message` record, so the rest of the app doesn't care where an item came from.
+- OST/PST reading runs in a child process (`unbound/pff_process.py`): libpff is a C library decoding files from anywhere, and a crash in it would otherwise close the window mid-conversion. If the reader dies or hangs, that item is logged as failed and a new reader takes over.
 - Neither needs Outlook or the original profile.
 
 ### 2. Writer (PST creation)
@@ -34,7 +38,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 ### 3. Interface
 
 - PySide6 desktop window, `unbound/app.py`; conversion engine in `unbound/converter.py`
-- Packaged as a single Windows EXE with PyInstaller, published on GitHub Releases
+- Packaged as a single Windows EXE with PyInstaller (`Unbound.spec`), built and published to GitHub Releases by a GitHub Actions workflow
 
 ## Interface layout
 
@@ -50,23 +54,28 @@ Done:
 
 - ~~Contacts and calendar items~~ 1.1
 - ~~Apple Mail (Mac) MBOX to PST conversion~~ 1.2
+- ~~Map time zone names in IANA format (e.g. `America/New_York`, written by phones and Google) to Windows zones~~ 1.3
+- ~~Emails attached to other emails in Apple Mail exports~~ 1.3 (they were being dropped)
 
 Next candidates:
 
 - Tasks, notes and journal entries; contact groups (distribution lists)
 - Emails attached to other emails (embedded messages) in OST/PST sources
 - Changed occurrences of a repeating meeting: copy a changed body and attendee list too
-- Map time zone names in IANA format (e.g. `America/New_York`, written by phones and Google) to Windows zones
 - Apple Mail: map mailbox names to Outlook's ("Sent Messages" to "Sent Items"); read Mail's own storage (`.emlx` in `~/Library/Mail`) so read/flagged status survives
 - Date range filters
 - Splitting very large PSTs
-- Signing the EXE so Windows SmartScreen doesn't warn
+- Resuming an interrupted conversion (skipping what's already in the PST)
+- Signing the EXE so Windows SmartScreen names the publisher and trust carries over between releases: the release workflow is ready for it, and what's left is choosing a signing route and adding its credentials (see "Signing and Windows SmartScreen" in DEVELOPMENT.md)
+- Publishing through the Microsoft Store (MSIX), the only route with no SmartScreen warning from the first day
+- A licence for Unbound's own code
 
 ## Releases
 
 - **1.0.0:** mail from OST to PST (Exchange/Microsoft 365 and IMAP OSTs)
 - **1.1.0:** calendar and contacts; PSTs created as Unicode (1.0.0 made ANSI PSTs)
 - **1.2.0:** Apple Mail (MBOX); inline images in OST emails kept again; plain-text and rich-text mail keep their format; repeating meetings in other time zones fixed; new title, logo and Browse menu
+- **1.3.0:** safety and reliability; see "Version 1.3" below
 - **1.2.1:** fixes the EXE (1.1.0 and 1.2.0): calendar items failed with "No module named 'win32timezone'" and emails got the conversion date as their received date, because PyInstaller left out a module pywin32 loads on demand. The self-check now passes a date through COM, the log lists refused properties, and `Unbound.exe --convert` lets the EXE itself be tested end to end
 
 ## Risks and first steps
@@ -111,3 +120,16 @@ Next candidates:
 - Tested end to end with a generated export (`scripts/mbox_test.py`): emoji and encoded subjects, HTML with inline image, attachments, Cc, read/unread, nested mailboxes; all checks pass. Not yet tested with a real export from a Mac.
 - Review fixes before release: a repeating series in another time zone now takes its zone from the recurrence (`PidLidAppointmentTimeZoneDefinitionRecur`) rather than the start "display" zone, which Outlook resets to the local zone when the pattern is set (it shifted such a series by the zone difference when a converted PST was converted again); rich-text (RTF-only) mail keeps its formatting; an Apple mailbox that only holds other mailboxes is no longer reported as failed; attachments without a long file name use their short name.
 - Full test run: live OST through the window (working copy, 184 emails, 587 calendar items, 0 failed), OST/PST scripts, PST round trip (184/184 emails, 587/587 appointments identical, 281 inline images kept), MBOX end-to-end and edge cases, EXE self-check.
+
+## Version 1.3: safety and reliability
+
+From a review of the code for security, bugs and dependencies.
+
+- **Nothing left behind.** Closing the window during a conversion used to give up after two minutes and exit anyway, which left the PST attached to the Outlook profile and, for this PC's own OST, a full copy of the mailbox in `%TEMP%`. A crash did the same. Now the window waits for the conversion to stop; every conversion has its own temporary folder with a marker file that stays open while it runs; and the next start removes the folder of a conversion that died and detaches its PST. Tested by killing a conversion partway. Outlook keeps the file of such a PST locked for about six minutes after it's detached, until Windows clears up the dead program's connections.
+- **Reader in its own process**, as described under Architecture. Tested with a stand-in reader that crashes and hangs, and with damaged files.
+- **Recipients and senders.** A quote in a display name broke the `"Name" <address>` text handed to Outlook. A recipient with only a name was looked up in *this* PC's address book and could become a different person. An Exchange sender with only a directory address (`/o=...`) was stored as an SMTP address. All three fixed.
+- **Bugs found.** A folder without a name was passed to Outlook as an empty name, so every item in it failed. A body line starting with "From " split an MBOX message in two when the file didn't quote such lines; a separator must now carry a date, as real ones do. An email attached to another email in an MBOX was dropped, and its own attachments were shown on the outer message. A long attachment name lost its extension. A failed conversion left no log, and a log that couldn't be saved left the window stuck.
+- **Dependencies.** All pinned with checksums, including PyInstaller, which wasn't pinned before. No known vulnerabilities in any of them at the time (PyPI and OSV databases). Dependabot proposes updates; CI audits them weekly.
+- **Tests and CI.** Unit tests that need neither Outlook nor a mailbox, run with pyflakes, a build of the EXE and its self-check on every push. A generated PST fixture (`scripts/make_pst_fixture.py`) lets calendar and contacts be tested end to end without a real OST.
+- **Releases** are built by GitHub Actions from a version tag, with a checksum file, the licence notices of the bundled libraries, an optional signing step, and (for a public repository) a build attestation.
+- Full test run: unit tests; MBOX end to end (7 messages, all checks pass); PST round trips through the reader process (7/7 emails, 5/5 appointments including a series with a cancelled and a moved occurrence, 2/2 contacts identical); the same with the built EXE; the window driven through a conversion, a close during a conversion and a start after a killed conversion. Not yet run against a real OST: IANA time zones, an Exchange sender without an internet address, and recipients without an address.

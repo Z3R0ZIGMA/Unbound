@@ -7,7 +7,8 @@ Usage:
 The messages cover the cases a converter gets wrong: encoded and emoji
 subjects, HTML with inline (cid:) images, attachments, many recipients,
 lines starting with "From " (quoted as ">From " in mbox), plain text only,
-and a missing Status header. Writes expected.json describing each message so
+a missing Status header, an email attached to another email, and a recipient
+whose name contains quotes. Writes expected.json describing each message so
 a test can check the converted PST against it.
 """
 
@@ -76,6 +77,17 @@ def build():
     m.add_attachment(PNG, "image", "png", filename="photo.png")
     msgs["Inbox"].append(m)
 
+    # An email passed on as an attachment, copied to someone whose name has
+    # quotes in it (which once broke the address Outlook was given)
+    inner = base("Original message", bob, [alice], t0 - timedelta(days=1))
+    inner.set_content("The message being passed on.\n")
+    inner.add_attachment(PDF, "application", "pdf", filename="Inside the attached email.pdf")
+    m = base("Passed on as an attachment", alice, [me], t0 + timedelta(days=5),
+             cc=[('Smith, "JJ" John', "jj", "example.test")])
+    m.set_content("See the attached email.\n")
+    m.add_attachment(inner)
+    msgs["Inbox"].append(m)
+
     m = base("Sent from my Mac", me, [alice, bob, carol], t0 + timedelta(days=2))
     m.set_content("A reply.\n\n> From: Alice\n> quoted text\n")
     msgs["Sent Messages"] = [m]
@@ -117,9 +129,16 @@ def main():
         with open(os.path.join(folder, "Info.plist"), "w", encoding="utf-8") as fh:
             fh.write(INFO_PLIST)
         for m in messages:
+            # An attached email arrives as "<its subject>.eml" (size not
+            # checked: it's written out again, not copied byte for byte), and
+            # what's attached inside it stays inside it
+            attached = [p for p in m.iter_attachments() if p.get_content_type() == "message/rfc822"]
+            inside = {id(q) for p in attached for q in p.walk()}
             atts = [{"filename": p.get_filename(), "size": len(p.get_content()),
                      "content_id": (p["Content-ID"] or "").strip("<>") or None}
-                    for p in m.walk() if p.get_filename()]
+                    for p in m.walk() if p.get_filename() and id(p) not in inside]
+            atts += [{"filename": str(p.get_payload()[0]["Subject"]) + ".eml", "size": None,
+                      "content_id": None} for p in attached]
             expected.append({
                 "folder": mailbox, "subject": str(m["Subject"]),
                 "sender_email": m["From"].addresses[0].addr_spec,

@@ -1,0 +1,19 @@
+# Opens a pull request when a dependency or a GitHub Action has a new
+# version, with the new checksums filled in. CI then builds and tests it.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # These are released together and must match each other
+      qt:
+        patterns: ["pyside6*", "shiboken6"]
+      pyinstaller:
+        patterns: ["pyinstaller*", "altgraph", "pefile", "pywin32-ctypes"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

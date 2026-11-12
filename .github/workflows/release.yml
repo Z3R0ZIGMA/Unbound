@@ -1,0 +1,126 @@
+# Builds and publishes a release when a version tag is pushed:
+#
+#     git tag v1.3.0
+#     git push origin v1.3.0
+#
+# The EXE is built here, from the tagged code and the pinned dependencies,
+# not on anyone's own PC. It is then signed (once signing is set up, see
+# "Signing" in DEVELOPMENT.md), checksummed, and published as a release.
+# Nothing is published if a check, a test or the EXE's self-check fails.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: windows-latest
+    permissions:
+      contents: write      # create the release
+      id-token: write      # prove where the EXE was built
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+
+      - name: Check the tag matches the version in the code
+        shell: pwsh
+        run: |
+          $version = python -c "import unbound; print(unbound.__version__)"
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            Write-Error "Tag $env:GITHUB_REF_NAME doesn't match __version__ = $version in unbound/__init__.py"
+            exit 1
+          }
+
+      - name: Install dependencies (checksums enforced)
+        run: python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
+
+      - name: Static check and unit tests
+        run: |
+          python -m pyflakes unbound unbound_app.py scripts assets tests
+          python -m unittest discover -s tests -t .
+
+      - name: Build Unbound.exe
+        run: pyinstaller --noconfirm --clean Unbound.spec
+
+      # Signing is what lets Windows show a verified publisher instead of
+      # "Unknown publisher", and lets trust carry over from one release to
+      # the next. It runs once the SIGNING_* variables and AZURE_* secrets
+      # exist (Settings > Secrets and variables > Actions); until then the
+      # release is built unsigned, as before.
+      - name: Sign Unbound.exe
+        if: vars.SIGNING_ACCOUNT != ''
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ github.workspace }}\dist\Unbound.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Unbound
+
+      - name: Check the signature
+        if: vars.SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature dist\Unbound.exe
+          $signature | Format-List Status, StatusMessage, @{ n = 'Signer'; e = { $_.SignerCertificate.Subject } }
+          if ($signature.Status -ne 'Valid') { exit 1 }
+
+      - name: Note that this build is unsigned
+        if: vars.SIGNING_ACCOUNT == ''
+        run: echo "::warning::Unbound.exe was not signed (signing isn't set up), so Windows SmartScreen will warn about it."
+
+      # After signing, because signing changes the file
+      - name: Self-check the EXE
+        shell: pwsh
+        run: |
+          $run = Start-Process dist\Unbound.exe -ArgumentList '--check', 'check.txt' -Wait -PassThru
+          Get-Content check.txt
+          if ($run.ExitCode -ne 0) { exit 1 }
+
+      - name: Write the checksum and the licence notices
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\Unbound.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  Unbound.exe" | Set-Content -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+          Get-Content THIRD-PARTY-NOTICES.md, licenses\LGPL-3.0.txt, licenses\GPL-3.0.txt |
+            Set-Content -Encoding utf8 dist\Third-party-licenses.txt
+
+      # A signed statement, kept by GitHub, that this exact file was built by
+      # this workflow from this commit. Anyone can check a download with:
+      #     gh attestation verify Unbound.exe --repo OWNER/Unbound
+      # GitHub offers this for public repositories.
+      - name: Record where the EXE was built
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/Unbound.exe
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          gh release create $env:GITHUB_REF_NAME `
+            dist/Unbound.exe dist/SHA256SUMS.txt dist/Third-party-licenses.txt `
+            --repo $env:GITHUB_REPOSITORY --verify-tag `
+            --title "Unbound $version" --generate-notes `
+            --notes "Download Unbound.exe below. To check your download, run Get-FileHash Unbound.exe in PowerShell and compare the result with SHA256SUMS.txt. What changed in each version is listed under Releases in PLAN.md."

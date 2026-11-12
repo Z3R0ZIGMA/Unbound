@@ -1,0 +1,77 @@
+# Runs on every push and pull request: checks the code, runs the unit tests,
+# builds Unbound.exe and makes sure it starts with everything it needs.
+# A second job checks every pinned package against the public advisory
+# databases; it also runs weekly, so a vulnerability announced after the last
+# push still shows up.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"  # Mondays 05:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: windows-latest
+    steps:
+      # Actions are pinned to an exact commit, so a retagged release can't
+      # change what runs here. Dependabot keeps them up to date.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+
+      - name: Install dependencies (checksums enforced)
+        run: python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
+
+      - name: Static check
+        run: python -m pyflakes unbound unbound_app.py scripts assets tests
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Build Unbound.exe
+        run: pyinstaller --noconfirm --clean Unbound.spec
+
+      # The EXE can lack a library the source run has; this starts it for real
+      - name: Self-check the EXE
+        shell: pwsh
+        run: |
+          $run = Start-Process dist\Unbound.exe -ArgumentList '--check', 'check.txt' -Wait -PassThru
+          Get-Content check.txt
+          if ($run.ExitCode -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Unbound-unsigned-test-build
+          path: dist/Unbound.exe
+          retention-days: 7
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The files list exact versions with checksums, so nothing has to be
+      # installed (or even installable on Linux) to look them up
+      - name: Check every pinned package for known vulnerabilities
+        run: >
+          pipx run --spec pip-audit==2.10.1 pip-audit
+          --require-hashes --disable-pip
+          -r requirements.txt -r requirements-dev.txt

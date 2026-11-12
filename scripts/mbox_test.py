@@ -101,8 +101,9 @@ def main():
             "read state": bool(flags & mapi.MSGFLAG_READ) == e["read"],
             "not a draft": not flags & mapi.MSGFLAG_UNSENT,
             "HTML body": bool(m.html_body) == e["has_html"],
-            "attachments": sorted((a["filename"], len(a["data"])) for a in atts)
-                           == sorted((a["filename"], a["size"]) for a in e["attachments"]),
+            "attachments": sorted(a["filename"] for a in atts) == sorted(src_atts)
+                           and all(src_atts[a["filename"]]["size"] in (None, len(a["data"]))
+                                   for a in atts if a["filename"] in src_atts),
             "inline image id": all((a["content_id"] or None) == src_atts[a["filename"]]["content_id"]
                                    for a in atts if a["filename"] in src_atts),
             "inline image linked to HTML": all(f"cid:{a['content_id']}" in (m.html_body or "")

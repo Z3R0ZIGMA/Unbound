@@ -1,6 +1,6 @@
 # Developing Unbound
 
-How to run Unbound from source, rebuild the EXE, and find your way around the code. For using the app, see [README.md](README.md); for the design and roadmap, see [PLAN.md](PLAN.md).
+How to run Unbound from source, test it, build the EXE, publish a release, and find your way around the code. For using the app, see [README.md](README.md); for the design and roadmap, see [PLAN.md](PLAN.md).
 
 ## Run from source
 
@@ -8,46 +8,47 @@ Needs Python 3.10 or newer (developed on 3.15) and Outlook Classic. In PowerShel
 
 ```powershell
 py -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 .venv\Scripts\python unbound_app.py
 ```
 
-libpff-python ships prebuilt Windows wheels, so no C compiler is needed.
-
-## Build the EXE
-
-```powershell
-.venv\Scripts\python -m pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --name Unbound --icon assets/icon.ico --add-data "assets/icon.ico;assets" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone --exclude-module tkinter unbound_app.py
-```
-
-The result is `dist\Unbound.exe` (about 43 MB). `dist/` is git-ignored so builds don't bloat the repo's history; the EXE is published as a file on a [GitHub Release](https://github.com/Z3R0ZIGMA/Unbound/releases) instead. To publish a new version after rebuilding (with the [GitHub CLI](https://cli.github.com/), signed in):
-
-```powershell
-gh release create v1.2.1 dist\Unbound.exe --title "Unbound 1.2.1" --notes "What changed"
-```
-
-Rebuild right before publishing, so the EXE matches the pushed code. To check a build contains all its libraries and can pass dates to Outlook:
-
-```powershell
-Start-Process dist\Unbound.exe -ArgumentList '--check', 'check.txt' -Wait
-Get-Content check.txt
-```
-
-Every line should start with `OK`.
-
-**Hidden imports matter.** PyInstaller only bundles modules it can see being imported. pywin32 loads `win32timezone` on demand, the first time a date marked with a time zone goes through COM, so the build command lists it explicitly. Without it, 1.1.0 and 1.2.0 shipped an EXE where every calendar item failed and emails got the wrong received date, although the code worked fine from source. That's why the self-check passes a real date through COM, and why the EXE itself should be tested before a release (see [Testing](#testing)).
+`requirements.txt` is what the app needs; `requirements-dev.txt` adds PyInstaller (to build the EXE) and pyflakes. Both pin exact versions with checksums, so pip refuses a package that differs from the one reviewed. libpff-python ships prebuilt Windows wheels, so no C compiler is needed.
 
 ## Testing
 
-The scripts in `scripts/` check conversions end to end by writing a PST through Outlook and reading it back with pypff. They need Outlook Classic. They print pass/fail per field and never print message content.
+### Unit tests
 
-The OST tests need an OST to read. Outlook locks the OST of the profile on this PC while it runs, so close Outlook and copy the OST from `%LOCALAPPDATA%\Microsoft\Outlook` somewhere else first, then point the scripts at the copy. Delete the copy and the test PSTs afterwards; they contain your mail.
+Fast, and they need neither Outlook nor a mailbox:
 
 ```powershell
-# Apple Mail: builds a test export, converts it and checks every message (no OST needed)
+.venv\Scripts\python -m unittest discover -s tests -t .
+```
+
+They cover the folder scan, the MBOX reader, the recurrence and property decoders (including with damaged data), the reader process (including a reader that crashes or hangs), crash recovery, the conversion loop with a stand-in for Outlook, and the window's rules (what may be saved where, closing during a conversion). They use only Python's own `unittest`, so testing adds no dependencies.
+
+A static check catches undefined names and leftover imports:
+
+```powershell
+.venv\Scripts\python -m pyflakes unbound unbound_app.py scripts assets tests
+```
+
+### End to end, through Outlook
+
+The scripts in `scripts/` write a PST through Outlook and read it back with pypff. They need Outlook Classic. They print pass/fail per field and never print message content.
+
+```powershell
+# Apple Mail: builds a test export, converts it and checks every message
 .venv\Scripts\python scripts\mbox_test.py C:\Temp\unbound_test
 
+# Calendar and contacts: builds a test PST, converts it, compares every item
+.venv\Scripts\python scripts\make_pst_fixture.py C:\Temp\unbound_test\fixture.pst
+.venv\Scripts\python unbound_app.py --convert C:\Temp\unbound_test\fixture.pst C:\Temp\unbound_test\out.pst
+.venv\Scripts\python scripts\compare_pst.py C:\Temp\unbound_test\fixture.pst C:\Temp\unbound_test\out.pst
+```
+
+Those two need no real mailbox. The OST scripts do: Outlook locks the OST of the profile on this PC while it runs, so close Outlook and copy the OST from `%LOCALAPPDATA%\Microsoft\Outlook` somewhere else first, then point the scripts at the copy. Delete the copy and the test PSTs afterwards; they contain your mail.
+
+```powershell
 # OST: folder tree and a read of every item
 .venv\Scripts\python scripts\list_folders.py C:\Temp\copy.ost --sample 100000
 
@@ -58,11 +59,20 @@ The OST tests need an OST to read. Outlook locks the OST of the profile on this 
 .venv\Scripts\python scripts\copy_items_test.py C:\Temp\copy.ost C:\Temp\items.pst
 ```
 
-Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them), and `copy_items_test.py` fails "time zone" for appointments with an IANA zone name such as `America/New_York`. Everything else should pass.
+Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them). `copy_items_test.py` used to fail "time zone" for appointments with an IANA zone name such as `America/New_York`; since 1.3.0 those are given the matching Windows zone, which hasn't been run against a real OST yet. Everything else should pass.
+
+`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times and full recurrence; contacts: name and email), and which field differs when one isn't. Times are compared to the second.
 
 ### Testing the EXE itself
 
-Code that works from source can still fail in the EXE if PyInstaller left something out, so test the built EXE before each release. `Unbound.exe` has a hidden mode that converts without the window (the folders ticked by default), writes the usual log next to the PST, and exits with 0 if nothing failed:
+Code that works from source can still fail in the EXE if PyInstaller left something out, so test the built EXE before a release. `Unbound.exe` has two hidden modes for that. The first loads every library, starts a reader process and passes a date through COM:
+
+```powershell
+Start-Process dist\Unbound.exe -ArgumentList '--check', 'check.txt' -Wait
+Get-Content check.txt
+```
+
+Every line should start with `OK`. The second converts without the window (the folders ticked by default), writes the usual log next to the PST, and exits with 0 if nothing failed:
 
 ```powershell
 # Apple Mail: convert the test export with the EXE, then check every message
@@ -70,38 +80,121 @@ Code that works from source can still fail in the EXE if PyInstaller left someth
 Start-Process dist\Unbound.exe -ArgumentList '--convert', 'C:\Temp\exe_test\export', 'C:\Temp\exe_test\mbox_test.pst' -Wait
 .venv\Scripts\python scripts\mbox_test.py C:\Temp\exe_test --verify-only
 
-# OST: convert with the EXE, then compare every email, appointment and contact with the source
-Start-Process dist\Unbound.exe -ArgumentList '--convert', 'C:\Temp\copy.ost', 'C:\Temp\exe_test\ost.pst' -Wait
-.venv\Scripts\python scripts\compare_pst.py C:\Temp\copy.ost C:\Temp\exe_test\ost.pst
+# Calendar and contacts: convert the test PST with the EXE, then compare
+Start-Process dist\Unbound.exe -ArgumentList '--convert', 'C:\Temp\unbound_test\fixture.pst', 'C:\Temp\exe_test\out.pst' -Wait
+.venv\Scripts\python scripts\compare_pst.py C:\Temp\unbound_test\fixture.pst C:\Temp\exe_test\out.pst
 ```
 
-`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times and full recurrence; contacts: name and email), and which field differs when one isn't. Times are compared to the second.
-
-A quick static check catches undefined names and leftover imports:
+## Build the EXE
 
 ```powershell
-.venv\Scripts\python -m pip install pyflakes
-.venv\Scripts\python -m pyflakes unbound unbound_app.py scripts
+.venv\Scripts\pyinstaller --noconfirm --clean Unbound.spec
 ```
+
+The result is `dist\Unbound.exe` (about 43 MB). [Unbound.spec](Unbound.spec) holds everything about the build: the icon, the version shown in the file's properties (read from `unbound/__init__.py`), and the modules PyInstaller can't find by itself.
+
+**Hidden imports matter.** PyInstaller only bundles modules it can see being imported. pywin32 loads `win32timezone` on demand, the first time a date marked with a time zone goes through COM, so the spec lists it. Without it, 1.1.0 and 1.2.0 shipped an EXE where every calendar item failed and emails got the wrong received date, although the code worked fine from source. That's why the self-check passes a real date through COM.
+
+`dist/` is git-ignored so builds don't bloat the repo's history.
+
+## Continuous integration
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every push to `main` and every pull request:
+
+- **Test and build** (Windows): installs the pinned dependencies with checksums enforced, runs pyflakes and the unit tests, builds the EXE and runs its `--check`. The EXE is kept for a week as a download on the run's page, for trying a change out.
+- **Dependency audit:** looks every pinned package up in the public vulnerability databases with `pip-audit`. It also runs every Monday, so a vulnerability announced after the last push still shows up.
+
+Outlook isn't available there, so the end-to-end scripts above stay a manual step before a release.
+
+## Publishing a release
+
+1. Set the new version in [unbound/__init__.py](unbound/__init__.py). It's the only place it's written.
+2. Run the end-to-end scripts above.
+3. Commit, push, then tag that commit and push the tag:
+
+   ```powershell
+   git tag v1.3.0
+   git push origin v1.3.0
+   ```
+
+[.github/workflows/release.yml](.github/workflows/release.yml) then builds the EXE on GitHub from the tagged code (so it always matches what's in the repo), signs it if signing is set up, and publishes a release with `Unbound.exe`, its checksum in `SHA256SUMS.txt`, and the licence notices. You can edit the release's notes afterwards on its page. Nothing is published if a test or the EXE's self-check fails, or if the tag doesn't match the version in the code. Watch the run under the repository's **Actions** tab.
+
+While the repository is public, the workflow also records a build attestation: GitHub's signed statement that this exact file was built by this workflow from this commit. Anyone can check a download with `gh attestation verify Unbound.exe --repo Z3R0ZIGMA/Unbound`. GitHub doesn't offer that for private repositories on standard plans, so the step is skipped there.
+
+## Signing and Windows SmartScreen
+
+SmartScreen warns about a download when neither the file nor its publisher has a track record. An unsigned EXE has no publisher, so every release starts from nothing and shows "Windows protected your PC" with "Unknown publisher". Signing changes two things: the warning names the verified publisher, and trust builds up on the publisher, so it carries over to later releases. It isn't instant. Microsoft's own guidance is that a new publisher's downloads can still be warned about for some weeks, until enough people have run them, and that the pricier "EV" certificates no longer skip that wait. The one route with no warning from the first day is the Microsoft Store.
+
+| Route | Cost | Who can use it | What the release needs |
+|---|---|---|---|
+| **Azure Artifact Signing** (was Trusted Signing) | about $10 a month | Individuals in the USA and Canada; organisations there, in the EU, the UK and some other countries | Nothing more: the release workflow's signing step is written for it |
+| **Certificate from a certificate authority** (DigiCert, Sectigo, Certum and others) | roughly $150–300 a year | Anyone, anywhere | A different signing step: the key sits on a hardware token or in the authority's cloud service |
+| **SignPath Foundation** | free | Open-source projects that meet its conditions (public code under an open-source licence) | Its own signing step; the publisher shown is SignPath Foundation |
+| **Microsoft Store** | free | Anyone, anywhere | Packaging the app as MSIX and submitting it; Microsoft signs it |
+
+Check each provider's current terms before choosing; the first row's limits are from Microsoft's documentation at the time of writing.
+
+**Setting up Azure Artifact Signing.** Follow Microsoft's [quickstart](https://learn.microsoft.com/azure/artifact-signing/quickstart) to create a signing account, pass identity validation and create a *Public Trust* certificate profile. Then create an app registration in Microsoft Entra, give it the *Artifact Signing Certificate Profile Signer* role on the certificate profile, and create a client secret for it. In the GitHub repository, under **Settings → Secrets and variables → Actions**, add:
+
+| Kind | Name | Value |
+|---|---|---|
+| Variable | `SIGNING_ENDPOINT` | The account's URI, such as `https://eus.codesigning.azure.net/` |
+| Variable | `SIGNING_ACCOUNT` | The signing account's name |
+| Variable | `SIGNING_CERTIFICATE_PROFILE` | The certificate profile's name |
+| Secret | `AZURE_TENANT_ID` | The directory (tenant) ID |
+| Secret | `AZURE_CLIENT_ID` | The app registration's application (client) ID |
+| Secret | `AZURE_CLIENT_SECRET` | The client secret |
+
+From the next tag on, the release workflow signs the EXE, checks the signature and runs the EXE's self-check again. Until `SIGNING_ACCOUNT` exists it builds unsigned, and says so in the run's summary.
+
+## Updating dependencies
+
+[Dependabot](.github/dependabot.yml) opens a pull request each week for any dependency or GitHub Action with a new version, with the new checksums filled in; CI then builds and tests it. PySide6 and shiboken6 are updated together because they must match.
+
+To change a version by hand, the checksums have to be regenerated too. In a separate, throwaway environment:
+
+```powershell
+py -m venv C:\Temp\lock
+C:\Temp\lock\Scripts\python -m pip install pip-tools
+# in.txt: the packages marked "used directly" in the file being updated, one "name==version" per line
+C:\Temp\lock\Scripts\python -m piptools compile --generate-hashes --allow-unsafe --strip-extras --no-header -o C:\Temp\lock\out.txt C:\Temp\lock\in.txt
+```
+
+Then replace everything below the comment at the top of `requirements.txt` (or `requirements-dev.txt`) with the contents of `out.txt`. Rebuilding with a newer Python updates the Python runtime inside the EXE, which is a dependency too. Update the versions in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) to match.
+
+## How it's put together
+
+- **Reading happens in a second process.** OST and PST files are decoded by libpff, a C library, and may come from anywhere. If a damaged file made it crash inside the window's process, the window would vanish mid-conversion. So `unbound/pff_process.py` opens the file in a child process: if that dies or hangs on an item, the item is logged as failed, a new reader is started, and the conversion carries on. MBOX files are read by Python itself, in the main process.
+- **Each conversion has its own temporary folder** (`%TEMP%\unbound_…`) for the working copy of an OST and for attachments on their way into Outlook. A marker file in it stays open while the conversion runs. If Unbound dies, the next start finds the folder, sees that nothing holds the marker any more, deletes the folder and detaches that conversion's PST from Outlook. A conversion still running in another window keeps its marker locked and is left alone.
+- **Closing the window never abandons a conversion.** It asks the conversion to stop and closes once the PST is detached and the temporary folder is gone.
 
 ## Project layout
 
 | Path | What it is |
 |---|---|
 | `dist/Unbound.exe` | The built app (not in git; created by the build above) |
-| `unbound_app.py` | Entry point (also the `--check` self-test) |
+| `Unbound.spec` | How the EXE is built |
+| `unbound_app.py` | Entry point (also the `--check` and `--convert` test modes) |
+| `unbound/__init__.py` | The version number |
 | `unbound/app.py` | The window (PySide6, dark theme; colours are in `COLORS` at the top) |
-| `unbound/converter.py` | Folder scan and the conversion loop (OST, PST or MBOX → PST), log writing |
+| `unbound/converter.py` | Folder scan and the conversion loop (OST, PST or MBOX → PST), temporary files and crash recovery, log writing |
+| `unbound/pff_process.py` | Runs the OST/PST reader in a child process and restarts it if it dies |
 | `unbound/ost_reader.py` | Reads messages out of an OST or PST with pypff |
 | `unbound/mbox_reader.py` | Finds the mailboxes in an Apple Mail export and reads MBOX messages |
 | `unbound/pst_writer.py` | Writes mail, appointments and contacts into the PST through Outlook |
 | `unbound/props.py` | Reads every property of an item, resolving named properties via the file's name-to-ID map |
 | `unbound/appointment.py` | Decodes recurrence patterns and time zones, which Outlook only accepts through its object model |
+| `unbound/timezones.py` | Windows names for IANA time zones (`America/New_York`), asked of Windows itself |
 | `unbound/mapi.py` | MAPI property tags shared by reader and writer |
+| `tests/` | Unit tests (no Outlook needed) |
 | `scripts/list_folders.py` | Command-line check: prints an OST's folder tree and test-reads items |
 | `scripts/copy_one_message.py` | Command-line check: copies one message to a PST and compares every field |
 | `scripts/copy_items_test.py` | Command-line check: copies sample appointments and a contact to a PST and compares every property and the recurrence |
 | `scripts/make_mbox_fixture.py` | Builds a test Apple Mail export covering the tricky cases |
 | `scripts/mbox_test.py` | End-to-end MBOX check: builds the test export, converts it and verifies every message (`--verify-only` checks a PST made by the EXE) |
+| `scripts/make_pst_fixture.py` | Builds a test PST with calendar items and contacts through Outlook |
 | `scripts/compare_pst.py` | Compares a converted PST with its source, item by item |
 | `assets/make_icon.py` | Draws the app icon; re-run it after changing the colours, then rebuild |
+| `requirements.txt`, `requirements-dev.txt` | Pinned dependencies with checksums: the app's, and the build tools' |
+| `.github/` | CI, the release workflow and Dependabot's settings |
+| `THIRD-PARTY-NOTICES.md`, `licenses/` | The software inside the EXE and its licences |

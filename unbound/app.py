@@ -1,10 +1,12 @@
 """Unbound desktop window (PySide6)."""
 
 import os
+import shutil
+import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QFile, QObject, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -12,9 +14,15 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .converter import CALENDAR, CONTACTS, MAIL, convert, scan_folders, write_log
+from . import __version__
+from .converter import (
+    CALENDAR, CONTACTS, MAIL, PST_SIZE_LIMIT, convert, estimated_pst_size,
+    is_outlook_data_file, log_path_for, recover_interrupted, scan_folders,
+    write_failure_log, write_log,
+)
 from .mbox_reader import is_mbox_source
 from .ost_reader import OstInUseError
+from .pff_process import kill_readers
 
 APP_NAME = "Unbound"
 
@@ -132,6 +140,16 @@ class ConvertWorker(QObject):
     def cancel(self):
         self._cancel = True
 
+    def _fail(self, msg):
+        # Keep a record next to where the PST was going, as a finished run does
+        log = log_path_for(self.pst)
+        try:
+            write_failure_log(msg, self.ost, self.pst, log)
+            msg += f"\n\nThis was also saved to:\n{log}"
+        except OSError:
+            pass
+        self.failed.emit(msg)
+
     def run(self):
         import pythoncom  # COM must be initialised on the thread that uses it
         pythoncom.CoInitialize()
@@ -141,31 +159,62 @@ class ConvertWorker(QObject):
                                  progress=lambda d, t, f: self.progress.emit(d, t, f),
                                  should_cancel=lambda: self._cancel)
             except OstInUseError as e:
-                self.failed.emit(str(e))
+                self._fail(str(e))
                 return
             except Exception as e:
                 msg = str(e).splitlines()[0][:400]
                 if "Outlook.Application" in msg or "Invalid class string" in msg:
                     msg = ("Couldn't start Outlook. Unbound needs Outlook Classic "
                            "installed on this PC (the New Outlook can't write PST files).")
-                self.failed.emit(msg)
+                self._fail(msg)
                 return
-            log = os.path.splitext(self.pst)[0] + " - Unbound log.txt"
-            write_log(result, self.ost, self.pst, log)
+            log = log_path_for(self.pst)
+            try:
+                write_log(result, self.ost, self.pst, log)
+            except OSError:
+                log = ""  # the PST is still fine; say the log couldn't be saved
             self.done.emit(result, log)
         finally:
             pythoncom.CoUninitialize()
 
 
+class RecoverWorker(QObject):
+    """Detaches the PSTs that a conversion which was interrupted (a crash, a
+    power cut) left attached to the Outlook profile."""
+    done = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, psts):
+        super().__init__()
+        self.psts = psts
+
+    def run(self):
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            from .pst_writer import detach_stores
+            self.done.emit(detach_stores(self.psts))
+        except Exception as e:
+            self.failed.emit(str(e).splitlines()[0][:300])
+        finally:
+            pythoncom.CoUninitialize()
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, interrupted=()):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} – Convert to PST")
         self.resize(760, 680)
+        self.setAcceptDrops(True)  # a file or folder can be dropped on the window
         self.ost_path = None
+        self.pst_path = None
+        self.started = 0.0
         self.thread = None
         self.worker = None
         self._syncing = False
+        self._closing = False
+        self._pending_path = None  # a file to load once the current job is done
+        self._interrupted = list(interrupted)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -188,6 +237,9 @@ class MainWindow(QMainWindow):
         title.setObjectName("title")
         title_row.addWidget(title)
         title_row.addStretch(1)
+        version = QLabel(f"Version {__version__}")
+        version.setObjectName("muted")
+        title_row.addWidget(version, 0, Qt.AlignBottom)
         subtitle = QLabel("Convert an Outlook OST or an Apple Mail export (MBOX) into a PST")
         subtitle.setObjectName("muted")
         lay.addLayout(title_row)
@@ -197,7 +249,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("Choose an OST file or an Apple Mail export…")
+        self.path_edit.setPlaceholderText("Choose an OST file or an Apple Mail export, or drop one here…")
         self.browse_btn = QPushButton("Browse…")
         menu = QMenu(self.browse_btn)
         menu.addAction("Outlook OST file…", self.choose_file)
@@ -246,9 +298,28 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel("")
         self.status.setObjectName("muted")
+        self.status.setWordWrap(True)
         lay.addWidget(self.status)
 
         self.update_controls()
+        if self._interrupted:
+            self.status.setText("Cleaning up after a conversion that was interrupted…")
+            self.run_in_thread(RecoverWorker(self._interrupted),
+                               self.on_recovered, self.on_recover_failed)
+            self.update_controls()
+
+    # ---------- after an interrupted conversion ----------
+
+    def on_recovered(self, detached):
+        self.status.setText(
+            "A conversion was interrupted last time. Its temporary files were removed"
+            + (" and its PST was detached from Outlook." if detached else "."))
+
+    def on_recover_failed(self, _msg):
+        names = ", ".join(os.path.basename(p) for p in self._interrupted)
+        self.status.setText(
+            "A conversion was interrupted last time. Its temporary files were removed, but "
+            f"{names} may still be open in Outlook: right-click it there and choose Close.")
 
     # ---------- file and tree ----------
 
@@ -271,7 +342,27 @@ class MainWindow(QMainWindow):
         if path:
             self.load_file(path)
 
+    def _dropped_path(self, event):
+        """The one local file or folder being dragged, or None."""
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if len(urls) == 1 and urls[0].isLocalFile() and not self.busy():
+            return urls[0].toLocalFile()
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_path(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self._dropped_path(event)
+        if path:
+            event.acceptProposedAction()
+            self.load_file(path)
+
     def load_file(self, path):
+        if self.busy():
+            self._pending_path = path  # e.g. still cleaning up at startup
+            return
         self.ost_path = os.path.abspath(path)
         self.path_edit.setText(self.ost_path)
         self.tree.clear()
@@ -282,12 +373,16 @@ class MainWindow(QMainWindow):
         self.update_controls()
 
     def on_scan_failed(self, msg):
+        if self._closing:
+            return
         self.summary.setText("Couldn't read this file")
         QMessageBox.warning(self, APP_NAME, msg)
         self.ost_path = None
         self.update_controls()
 
     def on_scanned(self, top_nodes):
+        if self._closing:
+            return
         self.tree.blockSignals(True)
         for node in top_nodes:
             self.tree.addTopLevelItem(self._make_item(node))
@@ -381,6 +476,53 @@ class MainWindow(QMainWindow):
         self.none_btn.setEnabled(has_tree and not busy)
         self.convert_btn.setEnabled(has_tree and not busy and bool(self.selected_nodes()))
 
+    def _replace_existing(self, pst):
+        """Make way for the new PST. The save dialog already asked to replace
+        the file; Outlook would add to an existing PST instead, so it has to
+        go first. It goes to the Recycle Bin, so a slip can be undone."""
+        try:
+            with open(pst, "ab"):
+                pass  # only checks nothing else has it open
+        except OSError as e:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "The existing file can't be replaced because it's in use.\n\n"
+                "If it's open in Outlook, right-click it there and choose Close, then try "
+                "again. After a conversion that was interrupted, Outlook can keep hold of "
+                "the file for several minutes: wait a little, or save under another name."
+                f"\n\n{e}")
+            return False
+        if QFile.moveToTrash(pst):
+            return True
+        if QMessageBox.question(
+                self, APP_NAME,
+                "The existing file can't be moved to the Recycle Bin (this drive may not "
+                "have one).\n\nDelete it permanently instead?") != QMessageBox.Yes:
+            return False
+        try:
+            os.remove(pst)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, f"Couldn't delete the existing file.\n\n{e}")
+            return False
+        return True
+
+    def _room_problem(self, pst, nodes):
+        """A warning if the PST probably won't fit, else None."""
+        size = estimated_pst_size(self.ost_path, nodes,
+                                  [it.data(0, NODE_ROLE) for it in self._items()])
+        if size > PST_SIZE_LIMIT:
+            return (f"This selection is roughly {_size(size)}. Outlook stops adding to a PST "
+                    "at 50 GB, so the conversion would probably stop partway.\n\n"
+                    "Converting fewer folders at a time, into separate PSTs, avoids that.")
+        try:
+            free = shutil.disk_usage(os.path.dirname(pst)).free
+        except OSError:
+            return None
+        if free < size * 1.1:
+            return (f"The PST will be roughly {_size(size)}, and the drive you chose has "
+                    f"{_size(free)} free, so it may not fit.")
+        return None
+
     def start_convert(self):
         nodes = self.selected_nodes()
         if not nodes:
@@ -395,18 +537,23 @@ class MainWindow(QMainWindow):
         if not pst:
             return
         pst = os.path.abspath(pst)
-        if os.path.normcase(pst) == os.path.normcase(self.ost_path):
+        if _same_file(pst, self.ost_path):
             QMessageBox.warning(self, APP_NAME, "Choose a different file from the source.")
             return
-        if os.path.exists(pst):
-            # The save dialog already asked to replace it. Outlook would add to an
-            # existing PST rather than replace it, so remove it first.
-            try:
-                os.remove(pst)
-            except OSError as e:
-                QMessageBox.warning(self, APP_NAME,
-                                    f"Couldn't replace the existing file (is it open in Outlook?)\n\n{e}")
-                return
+        if is_outlook_data_file(pst):
+            # Files there can belong to the Outlook profile on this PC, and
+            # replacing one of those would lose mail
+            QMessageBox.warning(
+                self, APP_NAME,
+                "That folder is where Outlook keeps its own data files.\n\n"
+                "Save the PST somewhere else, such as Documents.")
+            return
+        problem = self._room_problem(pst, nodes)
+        if problem and QMessageBox.question(
+                self, APP_NAME, problem + "\n\nConvert anyway?") != QMessageBox.Yes:
+            return
+        if os.path.exists(pst) and not self._replace_existing(pst):
+            return
 
         self.pst_path = pst
         self.started = time.time()
@@ -421,6 +568,8 @@ class MainWindow(QMainWindow):
         self.update_controls()
 
     def on_progress(self, done, total, folder):
+        if self._closing:
+            return
         if done == 0:  # a setup step, e.g. making a working copy of the OST
             self.status.setText(folder)
             return
@@ -440,10 +589,13 @@ class MainWindow(QMainWindow):
             self.status.setText("Cancelling after the current item…")
 
     def on_converted(self, result, log_path):
+        if self._closing:
+            return
         self.cancel_btn.hide()
-        word = "Cancelled" if result.cancelled else "Done"
-        self.status.setText(f"{word} in {_duration(result.seconds)}. Log: {log_path}")
-        if not result.cancelled:
+        word = "Cancelled" if result.cancelled else "Stopped early" if result.stopped else "Done"
+        log_note = f"Log: {log_path}" if log_path else "The log couldn't be saved."
+        self.status.setText(f"{word} in {_duration(result.seconds)}. {log_note}")
+        if not result.cancelled and not result.stopped:
             self.progress.setValue(self.progress.maximum())
         c = result.copied
         lines = [f"Copied: {c[MAIL]:,} emails, {c[CALENDAR]:,} calendar items, "
@@ -454,21 +606,31 @@ class MainWindow(QMainWindow):
         if result.warnings:
             lines.append(f"Copied with warnings: {len(result.warnings):,} (see the log)")
         lines.append(f"Failed: {len(result.failures):,}")
-        lines += ["", f"PST: {self.pst_path}", f"Log: {log_path}"]
+        lines += ["", f"PST: {self.pst_path}", log_note]
         box = QMessageBox(self)
         box.setWindowTitle(APP_NAME)
-        box.setIcon(QMessageBox.Warning if result.failures or result.cancelled
+        box.setIcon(QMessageBox.Warning if result.failures or result.cancelled or result.stopped
                     else QMessageBox.Information)
-        box.setText(f"{word}. " + ("Some items couldn't be converted; they're listed in the log."
-                                   if result.failures else ""))
+        if result.stopped:
+            detail = result.stopped + " What was copied before that is in the PST."
+        elif result.failures:
+            detail = "Some items couldn't be converted; they're listed in the log."
+        else:
+            detail = ""
+        box.setText(f"{word}. {detail}")
         box.setInformativeText("\n".join(lines))
-        open_btn = box.addButton("Open folder", QMessageBox.ActionRole)
+        show_btn = box.addButton("Show PST in folder", QMessageBox.ActionRole)
+        log_btn = box.addButton("Open log", QMessageBox.ActionRole) if log_path else None
         box.addButton(QMessageBox.Ok)
         box.exec()
-        if box.clickedButton() == open_btn:
-            os.startfile(os.path.dirname(self.pst_path))
+        if box.clickedButton() == show_btn:
+            _show_in_folder(self.pst_path)
+        elif log_btn is not None and box.clickedButton() == log_btn:
+            os.startfile(log_path)
 
     def on_convert_failed(self, msg):
+        if self._closing:
+            return
         self.cancel_btn.hide()
         self.status.setText("Conversion failed")
         QMessageBox.critical(self, APP_NAME, msg)
@@ -492,19 +654,37 @@ class MainWindow(QMainWindow):
     def _thread_finished(self):
         self.thread.deleteLater()
         self.thread = self.worker = None
+        if self._closing:
+            self.close()  # the close that was waiting for this job to stop
+            return
         self.update_controls()
+        if self._pending_path:
+            path, self._pending_path = self._pending_path, None
+            self.load_file(path)
 
     def closeEvent(self, event):
-        if self.busy():
-            if QMessageBox.question(self, APP_NAME,
-                                    "A conversion is running. Stop it and close?") != QMessageBox.Yes:
-                event.ignore()
-                return
-            if hasattr(self.worker, "cancel"):
-                self.worker.cancel()
-            self.thread.quit()
-            self.thread.wait(120_000)
-        event.accept()
+        if not self.busy():
+            event.accept()
+            return
+        # Never close with a job still running: the conversion has to detach
+        # the PST from Outlook and delete its temporary files first. So ask
+        # it to stop, and close when it has (_thread_finished).
+        event.ignore()
+        if self._closing:
+            return
+        converting = isinstance(self.worker, ConvertWorker)
+        if converting and QMessageBox.question(
+                self, APP_NAME, "A conversion is running. Stop it and close?") != QMessageBox.Yes:
+            return
+        self._closing = True
+        self.setEnabled(False)
+        if converting:
+            self.worker.cancel()
+            self.status.setText("Stopping… Unbound closes as soon as Outlook has let go of the PST.")
+            # A reader stuck on a damaged file would never notice the cancel
+            QTimer.singleShot(15_000, kill_readers)
+        else:
+            kill_readers()  # only reading folders: nothing to tidy up
 
 
 def _duration(seconds):
@@ -516,6 +696,26 @@ def _duration(seconds):
         return f"{m}m {s:02d}s"
     h, m = divmod(m, 60)
     return f"{h}h {m:02d}m"
+
+
+def _size(n_bytes):
+    gb = n_bytes / 2**30
+    return f"{gb:.1f} GB" if gb >= 1 else f"{max(1, round(n_bytes / 2**20))} MB"
+
+
+def _same_file(a, b):
+    try:
+        return os.path.samefile(a, b)  # also sees through short names and links
+    except OSError:  # one of them doesn't exist
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _show_in_folder(path):
+    """Open the file's folder in Explorer with the file selected."""
+    try:
+        subprocess.Popen(f'explorer /select,"{os.path.normpath(path)}"')
+    except OSError:
+        os.startfile(os.path.dirname(path))
 
 
 def _icon_path():
@@ -531,10 +731,13 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Unbound.OSTtoPST")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
     if os.path.exists(_icon_path()):
         app.setWindowIcon(QIcon(_icon_path()))
     apply_dark_theme(app)
-    win = MainWindow()
+    # Temporary files of a conversion that crashed are removed here; the
+    # window then detaches that conversion's PST from Outlook
+    win = MainWindow(recover_interrupted())
     win.show()
     if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):  # file or export folder
         win.load_file(sys.argv[1])

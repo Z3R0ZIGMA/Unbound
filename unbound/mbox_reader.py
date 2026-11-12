@@ -23,6 +23,10 @@ from .ost_reader import Attachment, Message, Recipient
 
 MBOX_FILE = "mbox"  # the data file inside an Apple Mail .mbox folder
 _FROM_LINE = re.compile(rb"^From \S")
+# A real separator line ends in a date: "From a@b.c Mon Jan  1 00:00:00 2024"
+_FROM_LINE_DATED = re.compile(
+    rb"^From \S+ +.*\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*\b\d{1,2}:\d{2}")
+_HEADER_END = re.compile(rb"\r?\n\r?\n")
 _QUOTED_FROM = re.compile(rb"^>(>*From )", re.M)
 
 
@@ -102,10 +106,19 @@ def message_offsets(file):
     offsets = []
     pos = 0
     previous_blank = True
+    separator = None  # how this file marks a new message; set by its first one
     with open(file, "rb") as fh:
         for line in fh:
-            if previous_blank and _FROM_LINE.match(line):
-                offsets.append(pos)
+            if previous_blank and line.startswith(b"From "):
+                if separator is None:
+                    # Mail programs date every separator line. Asking for the
+                    # date stops a body line such as "From here on, ..." being
+                    # taken for a new message in files that don't quote those
+                    # lines. A file that doesn't date its separators is split
+                    # the loose way, as before.
+                    separator = _FROM_LINE_DATED if _FROM_LINE_DATED.match(line) else _FROM_LINE
+                if separator.match(line):
+                    offsets.append(pos)
             previous_blank = line in (b"\n", b"\r\n")
             pos += len(line)
     _offsets_cache[key] = offsets
@@ -155,6 +168,19 @@ def _text(part):
         return payload.decode("utf-8", errors="replace")
 
 
+def _leaf_parts(part, top=True):
+    """The parts of a message that hold content. An attached email counts as
+    one part: it isn't opened up, or its own attachments would be taken for
+    the outer message's and the email itself would be lost."""
+    if part.get_content_type() == "message/rfc822" and not top:
+        yield part
+    elif part.is_multipart():
+        for sub in part.get_payload():
+            yield from _leaf_parts(sub, top=False)
+    else:
+        yield part
+
+
 def parse_message(raw):
     msg = BytesParser(policy=policy.default).parsebytes(raw)
 
@@ -178,8 +204,8 @@ def parse_message(raw):
     body_parts = {id(p) for p in (plain_part, html_part) if p is not None}
 
     attachments, embedded = [], 0
-    for part in msg.walk():
-        if part.is_multipart() or id(part) in body_parts:
+    for part in _leaf_parts(msg):
+        if id(part) in body_parts:
             continue
         ctype = part.get_content_type()
         filename = part.get_filename()
@@ -200,7 +226,7 @@ def parse_message(raw):
             filename = f"attachment_{len(attachments) + 1}{ext}"
         attachments.append(Attachment(filename, data, content_id=cid))
 
-    header_block = raw.split(b"\n\n", 1)[0].decode("utf-8", errors="replace")
+    header_block = _HEADER_END.split(raw, 1)[0].decode("utf-8", errors="replace")
     return Message(
         message_class="IPM.Note",
         subject=str(msg["Subject"] or ""),
