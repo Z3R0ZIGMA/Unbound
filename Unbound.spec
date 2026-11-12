@@ -29,6 +29,7 @@ version_info = VSVersionInfo(
             StringStruct("FileDescription", "Unbound"),
             StringStruct("FileVersion", VERSION),
             StringStruct("InternalName", "Unbound"),
+            StringStruct("LegalCopyright", "Copyright (c) 2026 Z3R0ZIGMA. MIT License."),
             StringStruct("OriginalFilename", "Unbound.exe"),
             StringStruct("ProductName", "Unbound"),
             StringStruct("ProductVersion", VERSION),

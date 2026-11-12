@@ -129,7 +129,7 @@ SmartScreen warns about a download when neither the file nor its publisher has a
 |---|---|---|---|
 | **Azure Artifact Signing** (was Trusted Signing) | about $10 a month | Individuals in the USA and Canada; organisations there, in the EU, the UK and some other countries | Nothing more: the release workflow's signing step is written for it |
 | **Certificate from a certificate authority** (DigiCert, Sectigo, Certum and others) | roughly $150–300 a year | Anyone, anywhere | A different signing step: the key sits on a hardware token or in the authority's cloud service |
-| **SignPath Foundation** | free | Open-source projects that meet its conditions (public code under an open-source licence) | Its own signing step; the publisher shown is SignPath Foundation |
+| **SignPath Foundation** | free | Open-source projects that meet its conditions (public code under an open-source licence). Unbound is MIT-licensed; its repository would also have to be public | Its own signing step; the publisher shown is SignPath Foundation |
 | **Microsoft Store** | free | Anyone, anywhere | Packaging the app as MSIX and submitting it; Microsoft signs it |
 
 Check each provider's current terms before choosing; the first row's limits are from Microsoft's documentation at the time of writing.
@@ -197,4 +197,5 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `assets/make_icon.py` | Draws the app icon; re-run it after changing the colours, then rebuild |
 | `requirements.txt`, `requirements-dev.txt` | Pinned dependencies with checksums: the app's, and the build tools' |
 | `.github/` | CI, the release workflow and Dependabot's settings |
+| `LICENSE` | Unbound's own licence (MIT); the copyright line is also in the EXE's file details (`Unbound.spec`) |
 | `THIRD-PARTY-NOTICES.md`, `licenses/` | The software inside the EXE and its licences |

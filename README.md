@@ -74,3 +74,9 @@ Unbound works entirely on your PC and makes no internet connections of its own. 
 ## Development
 
 To run from source, rebuild the EXE, or find your way around the code, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+## Licence
+
+Unbound is released under the [MIT License](LICENSE): you may use, change and share it, including commercially, as long as the copyright notice stays with it. It comes with no warranty.
+
+`Unbound.exe` also contains other software under its own licences (Qt for Python and libpff under the LGPL, Python and pywin32 under the PSF licence); see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

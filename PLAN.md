@@ -68,7 +68,7 @@ Next candidates:
 - Resuming an interrupted conversion (skipping what's already in the PST)
 - Signing the EXE so Windows SmartScreen names the publisher and trust carries over between releases: the release workflow is ready for it, and what's left is choosing a signing route and adding its credentials (see "Signing and Windows SmartScreen" in DEVELOPMENT.md)
 - Publishing through the Microsoft Store (MSIX), the only route with no SmartScreen warning from the first day
-- A licence for Unbound's own code
+- ~~A licence for Unbound's own code~~ MIT License, chosen 12 November 2026 ([LICENSE](LICENSE)). It also makes Unbound eligible for SignPath Foundation's free signing once the repository is public
 
 ## Releases
 
