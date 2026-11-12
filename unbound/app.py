@@ -1,5 +1,6 @@
 """Unbound desktop window (PySide6)."""
 
+import gc
 import os
 import shutil
 import subprocess
@@ -21,7 +22,7 @@ from .converter import (
     write_failure_log, write_log,
 )
 from .mbox_reader import is_mbox_source
-from .ost_reader import OstInUseError
+from .ost_reader import OstInUseError, _names, is_locked, programs_using
 from .pff_process import kill_readers
 
 APP_NAME = "Unbound"
@@ -107,6 +108,8 @@ class ScanWorker(QObject):
     def __init__(self, path):
         super().__init__()
         self.path = path
+        self.in_use_by = []  # programs that have the file open, though it could be read
+        self.outlook_has_it = False  # it couldn't be read, because Outlook has it open
 
     def run(self):
         try:
@@ -119,8 +122,11 @@ class ScanWorker(QObject):
             if not nodes:
                 self.failed.emit("No folders or mailboxes were found here.")
                 return
+            if os.path.isfile(self.path) and is_locked(self.path):
+                self.in_use_by = programs_using(self.path)
             self.done.emit(nodes)
         except OstInUseError as e:
+            self.outlook_has_it = e.outlook
             self.failed.emit(str(e))
         except Exception as e:
             self.failed.emit("This couldn't be opened as an Outlook data file or an MBOX export.\n\n"
@@ -200,6 +206,42 @@ class RecoverWorker(QObject):
             pythoncom.CoUninitialize()
 
 
+class CloseOutlookWorker(QObject):
+    """Closes Outlook, then waits for it to let go of the file. For an
+    Outlook that's running without a window, which can't be closed by hand."""
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+
+    def _outlook_has_it(self):
+        return is_locked(self.path) and OstInUseError(self.path, programs_using(self.path)).outlook
+
+    def run(self):
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            try:
+                import win32com.client
+                win32com.client.GetActiveObject("Outlook.Application").Quit()
+            except Exception:
+                pass  # not reachable this way; the wait below shows whether it has gone
+            gc.collect()
+            deadline = time.time() + 90
+            while self._outlook_has_it():
+                if time.time() > deadline:
+                    self.failed.emit(
+                        "Outlook is still running. End \"Microsoft Outlook\" in Task Manager "
+                        "(Ctrl+Shift+Esc), then choose the file again.")
+                    return
+                time.sleep(1)
+            self.done.emit(self.path)
+        finally:
+            pythoncom.CoUninitialize()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, interrupted=()):
         super().__init__()
@@ -214,6 +256,7 @@ class MainWindow(QMainWindow):
         self._syncing = False
         self._closing = False
         self._pending_path = None  # a file to load once the current job is done
+        self._after_job = None  # something to start once the current job's thread has finished
         self._interrupted = list(interrupted)
 
         root = QWidget()
@@ -376,9 +419,35 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self.summary.setText("Couldn't read this file")
-        QMessageBox.warning(self, APP_NAME, msg)
-        self.ost_path = None
+        path, self.ost_path = self.ost_path, None
+        box = QMessageBox(QMessageBox.Warning, APP_NAME, msg, parent=self)
+        close_btn = None
+        if getattr(self.worker, "outlook_has_it", False):
+            close_btn = box.addButton("Close Outlook and try again", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if close_btn is not None and box.clickedButton() == close_btn:
+            if self.busy():  # the scan's thread is still winding down
+                self._after_job = lambda: self.close_outlook_then_load(path)
+            else:
+                self.close_outlook_then_load(path)
         self.update_controls()
+
+    def close_outlook_then_load(self, path):
+        self.summary.setText("Closing Outlook…")
+        self.path_edit.setText(path)
+        self.run_in_thread(CloseOutlookWorker(path), self.on_outlook_closed,
+                           self.on_outlook_not_closed)
+        self.update_controls()
+
+    def on_outlook_closed(self, path):
+        self._pending_path = path  # loaded when this job's thread has finished
+
+    def on_outlook_not_closed(self, msg):
+        if self._closing:
+            return
+        self.summary.setText("Couldn't read this file")
+        QMessageBox.warning(self, APP_NAME, msg)
 
     def on_scanned(self, top_nodes):
         if self._closing:
@@ -389,6 +458,12 @@ class MainWindow(QMainWindow):
         self.tree.blockSignals(False)
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setExpanded(True)
+        in_use_by = getattr(self.worker, "in_use_by", None)
+        if in_use_by:
+            one = len(in_use_by) == 1
+            self.status.setText(
+                f"{_names(in_use_by)} {'has' if one else 'have'} this file open. That's fine: "
+                "Unbound converts it from a copy it takes when you click Convert.")
         self.update_summary()
         self.update_controls()
 
@@ -658,7 +733,10 @@ class MainWindow(QMainWindow):
             self.close()  # the close that was waiting for this job to stop
             return
         self.update_controls()
-        if self._pending_path:
+        if self._after_job:
+            job, self._after_job = self._after_job, None
+            job()
+        elif self._pending_path:
             path, self._pending_path = self._pending_path, None
             self.load_file(path)
 

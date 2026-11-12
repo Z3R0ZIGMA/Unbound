@@ -1,6 +1,9 @@
 """Read messages out of an OST/PST with pypff into plain Python objects."""
 
+import ctypes
+import mmap
 import os
+from ctypes import wintypes
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -50,16 +53,44 @@ ATTACH_CONTENT_ID = 0x3712
 ATTACH_SHORT_FILENAME = 0x3704  # 8.3 name, used when there is no long one
 
 
-class OstInUseError(OSError):
-    """The file is locked, almost always by Outlook using it for its profile."""
+def _has_outlook(programs):
+    return any("outlook" in p.lower() for p in programs)
 
-    def __init__(self, path):
-        super().__init__(
-            "Outlook is using this file, so it can't be read right now.\n\n"
-            "It's the data file of the Outlook profile on this PC. Close Outlook "
-            "and try again. If Outlook is already closed, Windows Search may be "
-            "indexing the file in the background: wait a minute or two and try again.\n\n"
-            f"File: {path}")
+
+def _names(programs):
+    """'Word', 'Word and Excel', 'Word, Excel and Teams'."""
+    programs = list(programs)
+    if len(programs) <= 1:
+        return "".join(programs)
+    return ", ".join(programs[:-1]) + " and " + programs[-1]
+
+
+class OstInUseError(OSError):
+    """The file can't be read because another program is using it.
+
+    `programs` names the ones Windows reports as having it open; `outlook`
+    says whether Outlook is among them.
+    """
+
+    def __init__(self, path, programs=()):
+        self.programs = list(programs)
+        self.outlook = _has_outlook(self.programs)
+        if self.outlook:
+            text = ("Outlook is using this file, so it can't be read right now.\n\n"
+                    "Close Outlook and try again. If you can't see an Outlook window, it's "
+                    "running in the background: Unbound starts Outlook to write a PST, and "
+                    "Outlook keeps running afterwards.")
+        elif self.programs:
+            one = len(self.programs) == 1
+            text = (f"{_names(self.programs)} {'has' if one else 'have'} this file open, "
+                    "so it can't be read right now.\n\n"
+                    f"Close {'it' if one else 'them'} and try again.")
+        else:
+            text = ("Another program is using this file, so it can't be read right now.\n\n"
+                    "If it's the data file of the Outlook profile on this PC, close Outlook "
+                    "and try again. If Outlook is already closed, Windows Search may be "
+                    "indexing the file in the background: wait a minute or two and try again.")
+        super().__init__(f"{text}\n\nFile: {path}")
 
 
 def is_lock_error(e):
@@ -68,16 +99,116 @@ def is_lock_error(e):
             or getattr(e, "winerror", None) in (32, 33))
 
 
+def is_locked(path):
+    """Whether another program has locked the start of the file, so that an
+    ordinary read of it is refused. Outlook's data files are locked there by
+    every program that has them open: Outlook, and also Word, Excel, Teams
+    and Windows Search, which all open the mailbox while they run."""
+    try:
+        with open(path, "rb") as fh:
+            fh.read(65536)
+        return False
+    except PermissionError:
+        return True
+    except OSError as e:
+        return is_lock_error(e)
+
+
+class _RM_UNIQUE_PROCESS(ctypes.Structure):
+    _fields_ = [("dwProcessId", wintypes.DWORD), ("ProcessStartTime", wintypes.FILETIME)]
+
+
+class _RM_PROCESS_INFO(ctypes.Structure):
+    _fields_ = [("Process", _RM_UNIQUE_PROCESS), ("strAppName", wintypes.WCHAR * 256),
+                ("strServiceShortName", wintypes.WCHAR * 64), ("ApplicationType", ctypes.c_int),
+                ("AppStatus", wintypes.ULONG), ("TSSessionId", wintypes.DWORD),
+                ("bRestartable", wintypes.BOOL)]
+
+
+def programs_using(path):
+    """Names of the programs that have this file open, as Windows knows them
+    ("Microsoft Word"), asked of the Restart Manager. Empty if there are
+    none, or if Windows can't say."""
+    try:
+        rm = ctypes.WinDLL("rstrtmgr")
+    except OSError:
+        return []
+    session = wintypes.DWORD()
+    if rm.RmStartSession(ctypes.byref(session), 0, ctypes.create_unicode_buffer(33)):
+        return []
+    try:
+        files = (wintypes.LPCWSTR * 1)(os.path.abspath(path))
+        if rm.RmRegisterResources(session, 1, files, 0, None, 0, None):
+            return []
+        needed, reasons = wintypes.UINT(0), wintypes.DWORD(0)
+        count = wintypes.UINT(64)
+        found = (_RM_PROCESS_INFO * 64)()
+        if rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), found,
+                        ctypes.byref(reasons)):
+            return []
+        own = os.getpid()
+        return sorted({i.strAppName for i in found[:count.value]
+                       if i.Process.dwProcessId != own and i.strAppName})
+    finally:
+        rm.RmEndSession(session)
+
+
+class MappedFile:
+    """A file read through a memory-mapped view, as a file object for libpff.
+
+    Windows applies another program's lock on part of a file to ordinary
+    reads, but not to a mapped view. That lets a mailbox be read while Word
+    or Excel has it open.
+    """
+
+    def __init__(self, path):
+        self._fh = open(path, "rb")
+        try:
+            self._view = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
+        except (OSError, ValueError):
+            self._fh.close()
+            raise
+
+    def read(self, size=-1):
+        return self._view.read(size)
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        return self._view.seek(offset, whence)
+
+    def tell(self):
+        return self._view.tell()
+
+    def get_size(self):
+        return self._view.size()
+
+    def close(self):
+        self._view.close()
+        self._fh.close()
+
+
 def open_file(path):
     f = pypff.file()
     # libpff uses \\?\ long paths on Windows, which reject forward slashes
     path = os.path.abspath(path)
     try:
         f.open(path)
+        return f
     except OSError as e:
-        if is_lock_error(e):
-            raise OstInUseError(path) from e
-        raise
+        if not is_lock_error(e):
+            raise
+        cause = e
+    programs = programs_using(path)
+    if _has_outlook(programs):
+        # Outlook changes the file as it syncs, so reading under it could
+        # give a mixture of old and new: it has to be closed
+        raise OstInUseError(path, programs) from cause
+    # Anything else (Word, Excel, Teams, Windows Search) only holds the
+    # mailbox open, so it's safe to read past its lock
+    f = pypff.file()
+    try:
+        f.open_file_object(MappedFile(path))
+    except (OSError, ValueError) as e:
+        raise OstInUseError(path, programs) from e
     return f
 
 

@@ -8,13 +8,13 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - an **Apple Mail** export (MBOX), for moving from a Mac to Windows
 - an existing **PST**, to upgrade an old ANSI-format PST to Unicode or copy only some of its folders
 
-## Features (current: 1.3.1)
+## Features (current: 1.3.2)
 
 - Open an OST, a PST, or an Apple Mail export folder (Browse, or drop it on the window)
 - Preview the folder tree with item counts; mail, calendar and contacts folders are ticked by default, system folders and shared mailboxes are not
 - Convert mail, calendar (including repeating meetings) and contacts, with a progress bar, time remaining and cancel
 - Save a log next to the PST: what was copied, skipped, copied with warnings or failed, plus the folder and item types found
-- Converts this PC's own (locked) OST from a temporary working copy, with progress and cancel
+- Converts this PC's own (locked) OST from a temporary working copy, with progress and cancel, also while Word, Excel, Teams or Windows Search has the file open
 - Looks after the user's files: an existing PST is replaced by way of the Recycle Bin, Outlook's own data folder is refused as a destination, and a PST that probably won't fit (or would pass Outlook's 50 GB limit) is warned about first
 - Cleans up after itself: closing the window stops the conversion properly, and a conversion cut short by a crash is tidied away at the next start
 - Carries on past damaged parts of an OST or PST, listing the affected items in the log
@@ -75,6 +75,7 @@ Next candidates:
 - **1.0.0:** mail from OST to PST (Exchange/Microsoft 365 and IMAP OSTs)
 - **1.1.0:** calendar and contacts; PSTs created as Unicode (1.0.0 made ANSI PSTs)
 - **1.2.0:** Apple Mail (MBOX); inline images in OST emails kept again; plain-text and rich-text mail keep their format; repeating meetings in other time zones fixed; new title, logo and Browse menu
+- **1.3.2:** a mailbox that other programs have open can be converted. Word and Excel hold the Outlook profile's OST open while they run (so do Teams and Windows Search) and lock part of it, and Unbound reported "Outlook is using this file" although Outlook was closed. It now asks Windows which programs have the file open (Restart Manager) and names them. If Outlook isn't among them it reads past the lock: Windows applies such locks to ordinary reads but not to a memory-mapped view, so the folder scan reads through one and the working copy is taken through one. If Outlook has the file, it's still refused, because Outlook changes the file as it syncs; the message then offers to close Outlook, for when it's running without a window. Tested with a real lock held by a second program (scan, working copy, a full conversion compared item by item) and by scanning a real OST while Word and Excel had it open; the "Close Outlook" button is tested with a stand-in, not against a live Outlook
 - **1.3.1:** the first published build of 1.3. The 1.3.0 tag has no release: all its tests passed, but the test process crashed as it exited (windows left over from the tests), which stopped the build. Only the tests changed
 - **1.3.0:** safety and reliability; see "Version 1.3" below (tagged, not published)
 - **1.2.1:** fixes the EXE (1.1.0 and 1.2.0): calendar items failed with "No module named 'win32timezone'" and emails got the conversion date as their received date, because PyInstaller left out a module pywin32 loads on demand. The self-check now passes a date through COM, the log lists refused properties, and `Unbound.exe --convert` lets the EXE itself be tested end to end

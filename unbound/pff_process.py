@@ -34,8 +34,8 @@ def _serve(conn, path, reader_factory):
     """The child process: open the file, then answer requests until told to stop."""
     try:
         reader = reader_factory(path)
-    except OstInUseError:
-        conn.send(("in_use", None))
+    except OstInUseError as e:
+        conn.send(("in_use", e.programs))
         return
     except Exception as e:
         conn.send(("failed", _first_line(e)))
@@ -113,7 +113,7 @@ class PffProcess:
             return
         self._stop(polite=False)
         if status == "in_use":
-            raise OstInUseError(self.path)
+            raise OstInUseError(self.path, detail or ())
         raise OSError(detail)
 
     def _stop(self, polite=True):

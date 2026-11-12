@@ -201,6 +201,77 @@ class Window(unittest.TestCase):
             self.win._thread_finished()
         self.assertEqual(run.call_args[0][0].path, os.path.abspath("later.ost"))
 
+    def test_says_which_programs_have_the_file_open(self):
+        self.win.ost_path = os.path.join(self.dir, "mail.ost")
+        self.win.worker = mock.Mock(in_use_by=["Microsoft Excel", "Microsoft Word"])
+        self.win.on_scanned(sample_tree())
+        self.assertIn("Microsoft Excel and Microsoft Word have this file open",
+                      self.win.status.text())
+        self.assertTrue(self.win.convert_btn.isEnabled())  # and it can still be converted
+
+    def scan_fails(self, outlook_has_it, click):
+        """A scan fails; the user clicks the button with this label. Returns
+        the labels of the buttons offered and the worker started, if any."""
+        self.win.ost_path = os.path.join(self.dir, "mail.ost")
+        self.win.worker = mock.Mock(outlook_has_it=outlook_has_it)
+        offered = []
+
+        def exec_(box):
+            offered.extend(b.text() for b in box.buttons())
+            box.clickedButton = lambda: next((b for b in box.buttons() if b.text() == click), None)
+            return 0
+
+        with mock.patch.object(QMessageBox, "exec", exec_), \
+                mock.patch.object(self.win, "run_in_thread") as run:
+            self.win.on_scan_failed("Outlook is using this file")
+        return offered, (run.call_args[0][0] if run.called else None)
+
+    def test_offers_to_close_outlook_when_outlook_has_the_file(self):
+        offered, worker = self.scan_fails(True, "Close Outlook and try again")
+        self.assertIn("Close Outlook and try again", offered)
+        self.assertIsInstance(worker, ui.CloseOutlookWorker)
+        self.assertEqual(worker.path, os.path.join(self.dir, "mail.ost"))
+        self.win.on_outlook_closed(worker.path)   # Outlook has gone:
+        with mock.patch.object(self.win, "run_in_thread") as run:
+            self.win.thread = mock.Mock()
+            self.win._thread_finished()           # the file is read again
+        self.assertIsInstance(run.call_args[0][0], ui.ScanWorker)
+
+    def test_outlook_is_left_alone_unless_asked(self):
+        offered, worker = self.scan_fails(True, "OK")
+        self.assertIsNone(worker)
+        offered, worker = self.scan_fails(False, "OK")
+        self.assertNotIn("Close Outlook and try again", offered)
+        self.assertIsNone(worker)
+
+
+class ClosingOutlook(unittest.TestCase):
+    def run_worker(self, still_has_it):
+        """Run the worker with a stand-in for Outlook; `still_has_it` is what
+        each successive check of the file reports."""
+        outlook, done, failed = mock.Mock(), [], []
+        worker = ui.CloseOutlookWorker("C:\\mail.ost")
+        worker.done.connect(done.append)
+        worker.failed.connect(failed.append)
+        checks = iter(still_has_it)
+        clock = iter(range(0, 10_000, 30))
+        with mock.patch("win32com.client.GetActiveObject", return_value=outlook), \
+                mock.patch.object(worker, "_outlook_has_it", lambda: next(checks)), \
+                mock.patch.object(ui.time, "sleep"), \
+                mock.patch.object(ui.time, "time", lambda: next(clock)):
+            worker.run()
+        return outlook, done, failed
+
+    def test_closes_outlook_and_waits_for_the_file(self):
+        outlook, done, failed = self.run_worker([True, True, False])
+        outlook.Quit.assert_called_once_with()
+        self.assertEqual((done, failed), (["C:\\mail.ost"], []))
+
+    def test_gives_up_if_outlook_stays(self):
+        outlook, done, failed = self.run_worker([True] * 50)
+        self.assertEqual(done, [])
+        self.assertIn("Task Manager", failed[0])
+
 
 if __name__ == "__main__":
     unittest.main()

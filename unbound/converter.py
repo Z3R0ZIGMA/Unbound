@@ -6,6 +6,7 @@ types are skipped and counted in the log.
 """
 
 import json
+import mmap
 import os
 import shutil
 import tempfile
@@ -17,7 +18,9 @@ import pypff
 
 from . import __version__
 from .mbox_reader import find_mailboxes, is_mbox_source, message_offsets, parse_message, read_raw
-from .ost_reader import OstInUseError, is_lock_error, open_file, read_message
+from .ost_reader import (
+    OstInUseError, is_lock_error, is_locked, open_file, programs_using, read_message,
+)
 from .props import load_name_map, read_props
 
 MAIL, CALENDAR, CONTACTS = "mail", "calendar", "contacts"
@@ -229,6 +232,7 @@ class Result:
     warnings: list = field(default_factory=list)  # items copied only partly
     cancelled: bool = False
     stopped: str = ""  # why the run ended early by itself (the source became unreadable)
+    source_in_use_by: list = field(default_factory=list)  # programs that had the source open
     seconds: float = 0.0
     skipped_attached_emails: int = 0
     # Diagnostics for the log: what kinds of folders and items were met
@@ -396,20 +400,40 @@ COPY_CHUNK = 8 * 2**20
 
 
 def _copy_file(source, target, on_progress=None, should_cancel=None):
-    """Copy a file in pieces, so a big one shows progress and can be cancelled."""
+    """Copy a file in pieces, so a big one shows progress and can be cancelled.
+
+    If another program has locked part of the file (Word, Excel and others
+    do that to a mailbox they have open), ordinary reads of that part are
+    refused. Windows doesn't apply such locks to a memory-mapped view, so
+    the copy carries on through one.
+    """
     size = os.path.getsize(source)
     copied = 0
+    view = None
     with open(source, "rb") as fin, open(target, "wb") as fout:
-        while True:
-            if should_cancel and should_cancel():
-                raise _Cancelled()
-            chunk = fin.read(COPY_CHUNK)
-            if not chunk:
-                break
-            fout.write(chunk)
-            copied += len(chunk)
-            if on_progress:
-                on_progress(copied, size)
+        try:
+            while True:
+                if should_cancel and should_cancel():
+                    raise _Cancelled()
+                if view is None:
+                    try:
+                        chunk = fin.read(COPY_CHUNK)
+                    except OSError as e:
+                        if not (isinstance(e, PermissionError) or is_lock_error(e)):
+                            raise
+                        view = mmap.mmap(fin.fileno(), 0, access=mmap.ACCESS_READ)
+                        continue
+                else:
+                    chunk = view[copied:copied + COPY_CHUNK]
+                if not chunk:
+                    break
+                fout.write(chunk)
+                copied += len(chunk)
+                if on_progress:
+                    on_progress(copied, size)
+        finally:
+            if view is not None:
+                view.close()
 
 
 def is_outlook_data_file(path):
@@ -429,8 +453,8 @@ def _working_copy(path, folder, on_progress=None, should_cancel=None):
             f"Not enough free space for a working copy of the OST: it needs "
             f"{size / 2**30:.1f} GB in {folder}, and {free / 2**30:.1f} GB is free.")
     copy = os.path.join(folder, os.path.basename(path))
-    # A running Outlook locks parts of its OST only briefly (e.g. while
-    # syncing), so retry a few times before asking the user to close it
+    # A file can be held briefly in a way that refuses even opening it, so
+    # retry a few times before reporting who has it
     for attempt in range(4):
         try:
             _copy_file(path, copy, on_progress, should_cancel)
@@ -441,7 +465,7 @@ def _working_copy(path, folder, on_progress=None, should_cancel=None):
                 time.sleep(2)
                 continue
             if locked:
-                raise OstInUseError(os.path.abspath(path)) from e
+                raise OstInUseError(os.path.abspath(path), programs_using(path)) from e
             raise
 
 
@@ -504,9 +528,16 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     try:
         # Outlook locks the OST of its own profile as soon as it starts, and we
         # start Outlook to write the PST. So read such files from a copy taken
-        # before Outlook starts.
+        # before Outlook starts. The same goes for a file another program has
+        # open right now (Word and Excel hold the mailbox open while they run).
         read_path = ost_path
-        if not mbox and is_outlook_data_file(ost_path):
+        in_use = not mbox and is_locked(ost_path)
+        if in_use:
+            result.source_in_use_by = programs_using(ost_path)
+            error = OstInUseError(os.path.abspath(ost_path), result.source_in_use_by)
+            if error.outlook:
+                raise error  # Outlook changes the file as it syncs: it has to be closed
+        if not mbox and (in_use or is_outlook_data_file(ost_path)):
             if progress:
                 progress(0, total, "Making a working copy of the OST…")
             read_path = _working_copy(ost_path, run.dir,
@@ -622,6 +653,9 @@ def write_log(result, ost_path, pst_path, log_path):
                  f"{'  (cancelled)' if result.cancelled else ''}\n")
         if result.stopped:
             fh.write(f"Stopped early: {result.stopped}\n")
+        if result.source_in_use_by:
+            fh.write(f"The source was open in {', '.join(result.source_in_use_by)}; "
+                     f"it was converted from a copy taken at the start.\n")
         fh.write(f"Copied: {result.total_copied} (mail {result.copied[MAIL]}, "
                  f"calendar {result.copied[CALENDAR]}, contacts {result.copied[CONTACTS]})\n")
         fh.write(f"Skipped (tasks, notes, contact groups, meeting requests and other "
