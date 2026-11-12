@@ -14,7 +14,7 @@ The versions are the ones pinned in `requirements.txt` and `requirements-dev.txt
 
 ## The LGPL libraries
 
-Qt for Python and libpff are used under the GNU Lesser General Public License, version 3. The licence text is in [licenses/LGPL-3.0.txt](licenses/LGPL-3.0.txt), and the GNU General Public License it builds on is in [licenses/GPL-3.0.txt](licenses/GPL-3.0.txt). In a release, both texts follow this page in `Third-party-licenses.txt`.
+Qt for Python and libpff are used under the GNU Lesser General Public License, version 3. The licence text is in [third-party-licenses/LGPL-3.0.txt](third-party-licenses/LGPL-3.0.txt), and the GNU General Public License it builds on is in [third-party-licenses/GPL-3.0.txt](third-party-licenses/GPL-3.0.txt). In a release, both texts follow this page in `Third-party-licenses.txt`.
 
 Unbound uses these libraries as separate, unmodified files; Unbound.exe unpacks them alongside its own code when it starts. To run Unbound with a different or modified version of one of them, install that version and rebuild the EXE as described under "Build the EXE" in [DEVELOPMENT.md](DEVELOPMENT.md).
 

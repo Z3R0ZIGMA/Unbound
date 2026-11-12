@@ -198,4 +198,4 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `requirements.txt`, `requirements-dev.txt` | Pinned dependencies with checksums: the app's, and the build tools' |
 | `.github/` | CI, the release workflow and Dependabot's settings |
 | `LICENSE` | Unbound's own licence (MIT); the copyright line is also in the EXE's file details (`Unbound.spec`) |
-| `THIRD-PARTY-NOTICES.md`, `licenses/` | The software inside the EXE and its licences |
+| `THIRD-PARTY-NOTICES.md`, `third-party-licenses/` | The software inside the EXE and the licence texts it requires (LGPL and GPL), shipped with each release |
