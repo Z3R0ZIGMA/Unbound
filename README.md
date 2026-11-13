@@ -39,6 +39,8 @@ Tested with OSTs from **Exchange / Microsoft 365** and **IMAP** accounts.
 
 When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. It lists what was copied, skipped and failed, plus the folder and item types found in the file. The finished message has buttons to show the PST in its folder and to open the log.
 
+**If Outlook stops responding at the end** (it can, for example while Microsoft 365 is having an outage), Unbound waits up to 3 minutes for Outlook to let go of the PST, then finishes anyway. Everything copied is in the PST; the message and the log say so and how to close the PST in Outlook if it's still listed there.
+
 **If a conversion is interrupted** by a crash or a power cut, start Unbound again: it deletes that conversion's temporary files and detaches its PST from Outlook. Outlook can keep hold of that PST file for several minutes afterwards, so to convert again straight away, save under another name.
 
 **Moving from a Mac (Apple Mail).** On the Mac, open Mail, select the mailboxes to move (Cmd-click to pick several), then choose **Mailbox → Export Mailbox…** and pick a folder. Mail writes one `Name.mbox` folder per mailbox, with sub-mailboxes inside. Copy that whole folder to the Windows PC (USB stick, cloud drive or network share), then in Unbound choose **Browse… → Apple Mail export (folder)** and select it. It's a folder rather than a file because Apple Mail exports each mailbox as its own folder. Loose `.mbox` files from other mail programs work too: put them in a folder and select that.
@@ -72,7 +74,7 @@ Outlook opens in the background during conversion (if it isn't already open) and
 - **Signed and encrypted (S/MIME) emails** may fail to convert; they're listed as failed in the log. This hasn't been tried with real signed mail yet.
 - **Changed occurrences** of a repeating appointment keep their new time, subject and location, but not a changed body or attendee list.
 - **Apple Mail exports** don't record which messages were read or flagged, so every message arrives as read and unflagged. Mailbox names are kept as they are (for example "Sent Messages" stays "Sent Messages").
-- **Speed.** About 0.15 seconds per email and 0.5 seconds per calendar item or contact through Outlook, so a 28,000-message mailbox takes roughly 70 minutes.
+- **Speed.** Roughly 0.1 to 0.15 seconds per item through Outlook (in testing, 849 emails and calendar items took 75 seconds), so a 28,000-message mailbox takes about an hour. A large OST from this PC's own Outlook folder also needs time for its working copy first.
 - **Outlook's reminders window** may appear when Outlook starts. Leave Outlook running until the conversion finishes.
 
 ## Privacy

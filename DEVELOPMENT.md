@@ -24,7 +24,7 @@ Fast, and they need neither Outlook nor a mailbox:
 .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-They cover the folder scan, the MBOX reader, the recurrence and property decoders (including with damaged data), the reader process (including a reader that crashes or hangs), crash recovery, the conversion loop with a stand-in for Outlook, the PST writer against stand-ins that behave as Outlook was seen to (`tests/fake_outlook.py`: stores it can't reach, folder names it treats as equal, yearly intervals in months, refused rich text), and the window's rules (what may be saved where, closing during a conversion, remembered folders, a PC without Outlook). The window tests keep their settings in a temporary file, never in the registry. They use only Python's own `unittest`, so testing adds no dependencies.
+They cover the folder scan, the MBOX reader, the recurrence and property decoders (including with damaged data), the reader process (including a reader that crashes or hangs), crash recovery, the conversion loop with a stand-in for Outlook, the PST writer against stand-ins that behave as Outlook was seen to (`tests/fake_outlook.py`: stores it can't reach, folder names it treats as equal, yearly intervals in months, a 29 February series, refused rich text, deleting that only moves to Deleted Items, an Outlook that stops answering while the PST is detached), and the window's rules (what may be saved where, closing during a conversion, remembered folders, a PC without Outlook). The window tests keep their settings in a temporary file, never in the registry. They use only Python's own `unittest`, so testing adds no dependencies.
 
 A static check catches undefined names and leftover imports:
 
@@ -61,7 +61,7 @@ Those two need no real mailbox. The OST scripts do: Outlook locks the OST of the
 
 Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them). `copy_items_test.py` used to fail "time zone" for appointments with an IANA zone name such as `America/New_York`; since 1.3.0 those are given the matching Windows zone, which hasn't been run against a real OST yet. Everything else should pass.
 
-`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times, full recurrence and notes; contacts: name, email and notes), and which field differs when one isn't. Times are compared to the second, and notes as text, since Outlook stores appointment notes as HTML that Unbound can only write back as text.
+`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times, full recurrence and notes; contacts: name, email and notes), and which field differs when one isn't. Times are compared to the second, and notes as text, since Outlook stores appointment notes as HTML that Unbound can only write back as text; invisible characters such as soft hyphens are ignored, because Outlook drops some of them. It reads every folder of both files, so against a real OST "source items not in the PST" also counts folders that weren't ticked.
 
 ### Testing the EXE itself
 
@@ -91,7 +91,7 @@ Start-Process dist\Unbound.exe -ArgumentList '--convert', 'C:\Temp\unbound_test\
 .venv\Scripts\pyinstaller --noconfirm --clean Unbound.spec
 ```
 
-The result is `dist\Unbound.exe` (about 43 MB). [Unbound.spec](Unbound.spec) holds everything about the build: the icon, the version shown in the file's properties (read from `unbound/__init__.py`), and the modules PyInstaller can't find by itself.
+The result is `dist\Unbound.exe` (about 43 MB; the release build on GitHub is about 47 MB, because it bundles some Windows runtime files a local build leaves out). [Unbound.spec](Unbound.spec) holds everything about the build: the icon, the version shown in the file's properties (read from `unbound/__init__.py`), and the modules PyInstaller can't find by itself.
 
 **Hidden imports matter.** PyInstaller only bundles modules it can see being imported. pywin32 loads `win32timezone` on demand, the first time a date marked with a time zone goes through COM, so the spec lists it. Without it, 1.1.0 and 1.2.0 shipped an EXE where every calendar item failed and emails got the wrong received date, although the code worked fine from source. That's why the self-check passes a real date through COM.
 
@@ -108,14 +108,16 @@ Outlook isn't available there, so the end-to-end scripts above stay a manual ste
 
 ## Publishing a release
 
-1. Set the new version in [unbound/__init__.py](unbound/__init__.py). It's the only place it's written.
-2. Run the end-to-end scripts above.
-3. Commit, push, then tag that commit and push the tag:
+1. Set the new version in [unbound/__init__.py](unbound/__init__.py). It's the only place it's written. Add the release to "Releases" in [PLAN.md](PLAN.md).
+2. Run the unit tests, pyflakes and the end-to-end scripts above. Rebuild `dist\Unbound.exe` from the code you're about to tag and run its `--check`.
+3. Commit, push, then tag that commit and push the tag (the tag must match the version, with a `v` in front):
 
    ```powershell
-   git tag v1.3.0
-   git push origin v1.3.0
+   git tag -a v1.4.0 -m "Unbound 1.4.0"
+   git push origin v1.4.0
    ```
+
+   Never move or re-push a tag that's already on GitHub. If a release build fails, fix it and release the next patch version.
 
 [.github/workflows/release.yml](.github/workflows/release.yml) then builds the EXE on GitHub from the tagged code (so it always matches what's in the repo), signs it if signing is set up, and publishes a release with `Unbound.exe`, its checksum in `SHA256SUMS.txt`, and the licence notices. You can edit the release's notes afterwards on its page. Nothing is published if a test or the EXE's self-check fails, or if the tag doesn't match the version in the code. Watch the run under the repository's **Actions** tab.
 
@@ -167,6 +169,7 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 - **Reading happens in a second process.** OST and PST files are decoded by libpff, a C library, and may come from anywhere. If a damaged file made it crash inside the window's process, the window would vanish mid-conversion. So `unbound/pff_process.py` opens the file in a child process: if that dies or hangs on an item, the item is logged as failed, a new reader is started, and the conversion carries on. MBOX files are read by Python itself, in the main process.
 - **Each conversion has its own temporary folder** (`%TEMP%\unbound_…`) for the working copy of an OST and for attachments on their way into Outlook. A marker file in it stays open while the conversion runs. If Unbound dies, the next start finds the folder, sees that nothing holds the marker any more, deletes the folder and detaches that conversion's PST from Outlook. A conversion still running in another window keeps its marker locked and is left alone.
 - **Closing the window never abandons a conversion.** It asks the conversion to stop and closes once the PST is detached and the temporary folder is gone.
+- **Detaching the PST has a time limit.** Outlook was seen to stop answering at that point during a Microsoft 365 outage. Detaching is asked of Outlook from a thread of its own (`DETACH_TIMEOUT` in `unbound/pst_writer.py`, 3 minutes); if it doesn't answer, the conversion finishes anyway and reports the PST as possibly still attached, with the counts.
 
 ## Project layout
 
