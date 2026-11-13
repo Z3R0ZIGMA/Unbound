@@ -327,6 +327,22 @@ class Improvements(WindowCase):
             self.win.on_convert_failed("no")
         self.assertGreater(self.win.progress.maximum(), 0)  # no longer animating
 
+    def test_bar_shows_how_far_a_cancelled_run_got(self):
+        """The "Detaching…" step shows the busy bar; afterwards the bar went
+        back to nothing, as if nothing had been copied."""
+        from unbound.converter import Result
+        self.load()
+        with mock.patch.object(ui.QFileDialog, "getSaveFileName",
+                               return_value=(os.path.join(self.dir, "o.pst"), "")), \
+                mock.patch.object(self.win, "run_in_thread"):
+            self.win.start_convert()
+        total = self.win.total_items
+        self.win.on_progress(7, total, "Inbox")
+        self.win.on_progress(0, total, "Detaching the PST from Outlook…")
+        with mock.patch.object(QMessageBox, "exec", lambda box: 0):
+            self.win.on_converted(Result(cancelled=True), "")
+        self.assertEqual((self.win.progress.maximum(), self.win.progress.value()), (total, 7))
+
     def test_time_left_ignores_set_up_time(self):  # QW8
         self.win.items_started, self.win.total_items = None, 100
         clock = iter([1000.0, 1010.0])
@@ -406,6 +422,41 @@ class ClosingOutlook(unittest.TestCase):
         outlook, done, failed = self.run_worker([True] * 50)
         self.assertEqual(done, [])
         self.assertIn("Task Manager", failed[0])
+
+    def test_reaches_an_outlook_running_in_the_background(self):
+        """An Outlook started without a window (as Unbound starts it) isn't
+        in Windows' table of running programs: GetActiveObject fails with
+        "Operation unavailable". It was the very case the button is for."""
+        outlook, done = mock.Mock(), []
+        worker = ui.CloseOutlookWorker("C:\\mail.ost")
+        worker.done.connect(done.append)
+        with mock.patch("win32com.client.GetActiveObject",
+                        side_effect=OSError("Operation unavailable")), \
+                mock.patch("win32com.client.Dispatch", return_value=outlook) as dispatch, \
+                mock.patch.object(worker, "_outlook_has_it", lambda: False):
+            worker.run()
+        dispatch.assert_called_once_with("Outlook.Application")
+        outlook.Quit.assert_called_once_with()
+        self.assertEqual(done, ["C:\\mail.ost"])
+
+
+class AfterACrash(unittest.TestCase):
+    def test_detaching_the_old_pst_has_a_time_limit(self):
+        """Without one, an Outlook that doesn't answer kept the window from
+        ever being closed."""
+        from unbound import pst_writer
+        done, failed = [], []
+        worker = ui.RecoverWorker(["C:\\old.pst"])
+        worker.done.connect(done.append)
+        worker.failed.connect(failed.append)
+        with mock.patch.object(pst_writer, "_detach_within", return_value=["C:\\old.pst"]) as detach:
+            worker.run()
+        self.assertEqual(detach.call_args[0][:2], (["C:\\old.pst"], pst_writer.DETACH_TIMEOUT))
+        self.assertEqual((done, failed), ([["C:\\old.pst"]], []))
+        with mock.patch.object(pst_writer, "_detach_within",
+                               side_effect=pst_writer.DetachTimeout("Outlook stopped responding")):
+            worker.run()
+        self.assertEqual(failed, ["Outlook stopped responding"])
 
 
 if __name__ == "__main__":

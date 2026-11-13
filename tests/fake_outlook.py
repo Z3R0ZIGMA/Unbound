@@ -157,11 +157,35 @@ class Recipients:
 
 
 class PropertyAccessor:
-    def __init__(self):
+    """Records what's set and how. `refuse` names properties Outlook won't
+    take. Like Outlook, SetProperties answers with one result per property
+    (None, or an error number without any text) and sets the others; with
+    nothing refused it answers with an empty tuple."""
+
+    def __init__(self, refuse=(), batches_fail=False):
         self.values = {}
+        self.refuse = set(refuse)
+        self.batches_fail = batches_fail
+        self.calls = []  # ("one", name) or ("batch", [names])
 
     def SetProperty(self, url, value):
+        self.calls.append(("one", url))
+        if url in self.refuse:
+            raise OutlookError(f'The property "{url}" does not support this operation.')
         self.values[url] = value
+
+    def SetProperties(self, urls, values):
+        self.calls.append(("batch", list(urls)))
+        if self.batches_fail:
+            raise OutlookError("The parameter is incorrect.")
+        results = []
+        for url, value in zip(urls, values):
+            if url in self.refuse:
+                results.append(-2147024891)
+            else:
+                self.values[url] = value
+                results.append(None)
+        return tuple(results) if any(r is not None for r in results) else ()
 
 
 class Item:

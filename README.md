@@ -72,9 +72,10 @@ Outlook opens in the background during conversion (if it isn't already open) and
 - **No internet headers.** Outlook doesn't let other programs write them, so the raw `Received:`/routing headers aren't copied.
 - **Rich-text formatting.** Outlook may refuse rich text (RTF) written by another program; it did on the PC used for testing. The email, or an appointment's or contact's notes, is then saved as plain text and the log says so. Appointment notes stored as HTML are always saved as plain text, because Outlook can't take HTML notes from another program.
 - **Signed and encrypted (S/MIME) emails** may fail to convert; they're listed as failed in the log. This hasn't been tried with real signed mail yet.
+- **Meetings you were invited to** arrive with the right times but shown in this PC's time zone, not the organiser's: Outlook sets that itself whenever such a meeting is saved.
 - **Changed occurrences** of a repeating appointment keep their new time, subject and location, but not a changed body or attendee list.
 - **Apple Mail exports** don't record which messages were read or flagged, so every message arrives as read and unflagged. Mailbox names are kept as they are (for example "Sent Messages" stays "Sent Messages").
-- **Speed.** Roughly 0.1 to 0.15 seconds per item through Outlook (in testing, 849 emails and calendar items took 75 seconds), so a 28,000-message mailbox takes about an hour. A large OST from this PC's own Outlook folder also needs time for its working copy first.
+- **Speed.** Roughly 0.05 seconds per item through Outlook on the PC used for testing, so a 28,000-message mailbox takes about half an hour; large attachments and a slower PC add to that. A large OST from this PC's own Outlook folder also needs time for its working copy first.
 - **Outlook's reminders window** may appear when Outlook starts. Leave Outlook running until the conversion finishes.
 
 ## Privacy

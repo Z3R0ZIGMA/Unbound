@@ -261,8 +261,10 @@ class RecoverWorker(QObject):
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            from .pst_writer import detach_stores
-            self.done.emit(detach_stores(self.psts))
+            from .pst_writer import DETACH_TIMEOUT, detach_stores
+            # With a time limit: an Outlook that doesn't answer would
+            # otherwise keep the window from ever being closed
+            self.done.emit(detach_stores(self.psts, timeout=DETACH_TIMEOUT))
         except Exception as e:
             self.failed.emit(first_line(e))
         finally:
@@ -286,11 +288,16 @@ class CloseOutlookWorker(QObject):
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            try:
-                import win32com.client
-                win32com.client.GetActiveObject("Outlook.Application").Quit()
-            except Exception:
-                pass  # not reachable this way; the wait below shows whether it has gone
+            import win32com.client
+            # An Outlook started in the background (as Unbound starts it)
+            # isn't in Windows' table of running programs, so GetActiveObject
+            # can't find it; connecting the ordinary way reaches it
+            for connect in (win32com.client.GetActiveObject, win32com.client.Dispatch):
+                try:
+                    connect("Outlook.Application").Quit()
+                    break
+                except Exception:
+                    continue  # the wait below shows whether it has gone
             gc.collect()
             deadline = time.time() + 90
             while self._outlook_has_it():
@@ -719,6 +726,7 @@ class MainWindow(QMainWindow):
         self.pst_path = pst
         self.started = time.time()
         self.items_started = None  # set at the first item, for the time-left estimate
+        self.items_done = 0
         self.total_items = max(1, sum(n.item_count for n in nodes))
         # Qt's moving "busy" bar while Outlook starts: that alone can take
         # minutes, and a bar stuck at 0% looks like a hang
@@ -745,6 +753,7 @@ class MainWindow(QMainWindow):
             return
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
+        self.items_done = done
         now = time.time()
         if getattr(self, "items_started", None) is None:
             # Time left is measured from the first item: the working copy and
@@ -759,10 +768,12 @@ class MainWindow(QMainWindow):
         self.status.setText(f"{done:,} of {total:,} · {folder}{eta}")
 
     def _reset_progress_range(self):
-        """Out of the "busy" pattern, e.g. when a run ends during set-up."""
+        """Out of the "busy" pattern (shown during set-up and while the PST
+        is detached), back to how far the conversion got."""
         if self.progress.maximum() == 0:
-            self.progress.setRange(0, max(1, getattr(self, "total_items", 1)))
-            self.progress.setValue(0)
+            total = max(1, getattr(self, "total_items", 1))
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(total, getattr(self, "items_done", 0)))
 
     def cancel_convert(self):
         if self.worker and hasattr(self.worker, "cancel"):

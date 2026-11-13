@@ -6,6 +6,8 @@ never "unsent"), then given the original sender, times and recipients via
 PropertyAccessor and re-classed as IPM.Note so it shows as normal mail.
 """
 
+import contextlib
+import functools
 import gc
 import html
 import os
@@ -20,6 +22,7 @@ from html.parser import HTMLParser
 
 import pythoncom
 import win32com.client
+from win32com.client import dynamic
 
 from . import appointment as cal
 from . import mapi
@@ -258,6 +261,67 @@ def _stores_newest_first(ns):
         yield store, path
 
 
+class _Dispatch(dynamic.CDispatch):
+    """pywin32's late-bound COM object, remembering what it learns about a
+    type of object (its properties, and how each method is called) for every
+    object of that type.
+
+    pywin32 keeps that per object, so each new email, recipient and
+    attachment asked Outlook all over again: some 80 extra round trips an
+    email, about half the time a conversion took. What's sent to Outlook to
+    do the work is unchanged.
+    """
+
+    # Objects reached through this one (an item's recipients, say) share too.
+    # pywin32 wraps them in two places: here, for a property's value...
+    def _wrap_dispatch_(self, ob, userName=None, returnCLSID=None):
+        return _wrap(self.__dict__["_types_"], ob, userName)
+
+    # ...and, for what a method returns, with the "Dispatch" that the code
+    # it generates for the method finds in its globals
+    def _make_method_(self, name):
+        method = super()._make_method_(name)
+        if method is not None:
+            method.__func__.__globals__["Dispatch"] = functools.partial(
+                _wrap, self.__dict__["_types_"])
+        return method
+
+
+def _wrap(types, ob, userName=None, *_):
+    """A COM object from Outlook as a _Dispatch. `types` is what's known so
+    far: {interface id: (type description, methods built, type information)}.
+    It belongs to one PstWriter, so to one conversion and one thread."""
+    if not isinstance(ob, dynamic.PyIDispatchType):
+        return win32com.client.Dispatch(ob, userName)
+    try:
+        typeinfo = ob.GetTypeInfo()
+        key = str(typeinfo.GetTypeAttr()[0])
+    except (pythoncom.com_error, AttributeError):
+        return dynamic.Dispatch(ob, userName)  # it won't say what it is
+    known = types.get(key)
+    if known is None:
+        obj = dynamic.Dispatch(ob, userName, createClass=_Dispatch, typeinfo=typeinfo)
+        types[key] = (obj._olerepr_, obj._builtMethods_, obj._lazydata_)
+    else:
+        obj = _Dispatch(ob, known[0], userName, lazydata=known[2])
+        obj.__dict__["_builtMethods_"] = known[1]
+    obj.__dict__["_types_"] = types
+    return obj
+
+
+def _outlook():
+    """Outlook's Application object. Starts Outlook if it isn't running."""
+    app = win32com.client.Dispatch("Outlook.Application")
+    if isinstance(app, dynamic.CDispatch):
+        # (Not when this PC has pywin32's generated classes for Outlook:
+        # those already know their types.)
+        try:
+            return _wrap({}, app._oleobj_, app._username_)
+        except Exception:
+            pass  # slower, but it works: pywin32's own object
+    return app
+
+
 def _set_if_changed(obj, name, value):
     try:
         if getattr(obj, name) == value:
@@ -293,9 +357,13 @@ def _detach(ns, paths, raise_errors=False):
     return removed
 
 
-def detach_stores(paths):
+def detach_stores(paths, timeout=None):
     """Detach PST files that a conversion which was interrupted left attached
-    to Outlook. Starts Outlook if it isn't running."""
+    to Outlook. Starts Outlook if it isn't running. Returns the paths that
+    were attached. With a timeout (seconds), DetachTimeout is raised if
+    Outlook hasn't answered by then."""
+    if timeout is not None:
+        return _detach_within(paths, timeout, raise_errors=False)
     ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
     try:
         return _detach(ns, paths)
@@ -308,7 +376,7 @@ class PstWriter:
     def __init__(self, pst_path, display_name=None, temp_dir=None, detach=()):
         self.pst_path = os.path.abspath(pst_path)
         self.temp_dir = temp_dir  # where attachments are staged; None = the system's
-        self.app = win32com.client.Dispatch("Outlook.Application")
+        self.app = _outlook()
         self.ns = self.app.GetNamespace("MAPI")
         if detach:
             _detach(self.ns, detach)
@@ -342,42 +410,69 @@ class PstWriter:
         """
         if not isinstance(folder_types, (list, tuple)):
             folder_types = [None] * (len(parts) - 1) + [folder_types]
-        folder = self.root
+        # Folders already found or made, by path: listing a folder's
+        # subfolders through Outlook again for each new one adds up in a
+        # mailbox with hundreds of folders
+        known = self.__dict__.setdefault("_folders", {})
+        folder, path = self.root, ()
         for name, ftype in zip(parts, folder_types):
-            existing = None
             # Matched the way Outlook matches: it won't create "archive" next
             # to "Archive" (IMAP accounts can have both), so they share one
             key = _folder_key(name)
-            for sub in folder.Folders:
-                if _folder_key(sub.Name) == key:
-                    existing = sub
-                    break
+            path += (key,)
+            existing = known.get(path)
+            if existing is None:
+                for sub in folder.Folders:
+                    if _folder_key(sub.Name) == key:
+                        existing = sub
+                        break
             if existing is None:
                 try:
                     existing = self._add_folder(folder, name, ftype)
                 except Exception:
                     # A name Outlook still treats as taken: keep the items apart
                     existing = self._add_folder(folder, f"{name} (2)", ftype)
-            folder = existing
+            folder = known[path] = existing
         return folder
+
+    def _items(self, folder):
+        """A folder's item collection, fetched once while items keep going
+        into the same folder."""
+        last = self.__dict__.get("_last_items")
+        if last is None or last[0] is not folder:
+            last = self.__dict__["_last_items"] = (folder, folder.Items)
+        return last[1]
 
     @staticmethod
     def _add_folder(parent, name, ftype):
         return parent.Folders.Add(name, ftype) if ftype else parent.Folders.Add(name)
 
-    def _staging(self):
+    def _staging(self, attachments=True):
         """A temporary folder for one item's attachments, inside the run's
-        own folder when there is one (short name there: paths have a limit)."""
+        own folder when there is one (short name there: paths have a limit).
+        None for an item without attachments, which needs no folder."""
+        if not attachments:
+            return contextlib.nullcontext()
         return tempfile.TemporaryDirectory(
             prefix="unbound_" if self.temp_dir is None else "a", dir=self.temp_dir)
 
+    def _item(self, entry_id):
+        """A saved item, opened afresh. The store's id is asked for once."""
+        store_id = self.__dict__.get("_store_id")
+        if store_id is None:
+            store_id = self.__dict__["_store_id"] = self.store.StoreID
+        return self.ns.GetItemFromID(entry_id, store_id)
+
     def _add_recipients(self, item, recipients, label):
+        if not recipients:
+            return
+        added = item.Recipients
         for r in recipients:
             text, resolve = recipient_text(r.name, r.email)
             if not text:
                 continue
             try:
-                rec = item.Recipients.Add(text)
+                rec = added.Add(text)
             except Exception as e:
                 self.property_errors[label] = first_line(e, 200)
                 continue
@@ -419,21 +514,62 @@ class PstWriter:
 
     def _copy_props(self, item, props, skip=None):
         """Copy raw properties onto the item; returns (set, failed) counts."""
-        pa = item.PropertyAccessor
-        ok = failed = 0
+        entries = []
         for p in props:
             if not should_copy(p) or (skip and skip(p)):
                 continue
-            value = p.value
-            if p.prop_type == PT_SYSTIME:
-                value = com_date(value)
-            try:
-                pa.SetProperty(p.url(), value)
-                ok += 1
-            except Exception as e:
-                failed += 1
-                self.property_errors[_prop_label(p)] = first_line(e, 200)
-        return ok, failed
+            value = com_date(p.value) if p.prop_type == PT_SYSTIME else p.value
+            entries.append((p.url(), value, _prop_label(p)))
+        # One by one: see _set_properties for why not in one call
+        refused = self._set_properties(item.PropertyAccessor, entries, together=False)
+        return len(entries) - len(refused), len(refused)
+
+    def _set_properties(self, accessor, entries, together=False):
+        """Set raw properties, given as (schema name, value, label for the
+        log). Returns (label, Outlook's error) for each one it refused, and
+        notes them for the log.
+
+        `together` sends them in one call (SetProperties), which is much
+        quicker: 40 properties took 25 ms one by one and 1 ms together.
+        Outlook answers with a result per property and sets the rest when it
+        refuses one. Only for a known, fixed set of text and date properties,
+        though. With an item's copied properties it isn't safe: one such
+        call on a contact (text, numbers, yes/no values and binary together)
+        crashed Outlook, and on appointments it let through properties that
+        Outlook refuses when asked singly.
+        """
+        refused = []
+
+        def one_by_one(some):
+            for name, value, label in some:
+                try:
+                    accessor.SetProperty(name, value)
+                except Exception as e:
+                    self.property_errors[label] = first_line(e, 200)
+                    refused.append((label, self.property_errors[label]))
+
+        if not together or len(entries) < 2:
+            one_by_one(entries)
+            return refused
+        try:
+            results = accessor.SetProperties([e[0] for e in entries], [e[1] for e in entries])
+        except Exception:
+            one_by_one(entries)  # the call as a whole wasn't taken
+            return refused
+        if not isinstance(results, (list, tuple)) or len(results) != len(entries):
+            return refused  # an empty answer: nothing was refused
+        again = []
+        for entry, result in zip(entries, results):
+            if result is None:
+                continue
+            if entry[2] in self.property_errors:
+                # The batch only gives an error number. The text for this
+                # property is already known from an earlier item
+                refused.append((entry[2], self.property_errors[entry[2]]))
+            else:
+                again.append(entry)  # ask again by itself, for the text
+        one_by_one(again)
+        return refused
 
     # ---------- appointments ----------
 
@@ -441,16 +577,30 @@ class PstWriter:
         name = cal.tz_key_name(blob)
         if not name:
             return None
+        # A calendar uses a handful of zones, so each is looked up once
+        zones = self.__dict__.setdefault("_zones", {})
+        if name not in zones:
+            zones[name] = self._find_zone(name)
+        if zones[name] is None:
+            self.warnings.append(f"time zone '{name}' not known to this PC")
+        return zones[name]
+
+    def _find_zone(self, name):
         # Outlook knows Windows zone names; phones and Google Calendar write
         # IANA ones ("America/New_York"), which Windows can translate
-        for candidate in (name, windows_zone(name)):
+        for candidate in (lambda: name, lambda: windows_zone(name)):
+            candidate = candidate()
             if not candidate:
                 continue
             try:
-                return self.app.TimeZones.Item(candidate)
+                zone = self.app.TimeZones.Item(candidate)
             except Exception:
                 continue
-        self.warnings.append(f"time zone '{name}' not known to this PC")
+            # Outlook answers with nothing, not an error, for a name it
+            # doesn't know. Taking that as an answer meant the Windows name
+            # was never tried, and such appointments lost their time zone
+            if zone is not None:
+                return zone
         return None
 
     def _to_pc_local(self, dt, tz):
@@ -458,21 +608,34 @@ class PstWriter:
         if tz is None:
             return dt
         try:
-            current = self.app.TimeZones.CurrentTimeZone
-            if tz.ID == current.ID:
+            pc = self.__dict__.get("_pc_zone")
+            if pc is None:
+                current = self.app.TimeZones.CurrentTimeZone
+                pc = self.__dict__["_pc_zone"] = (current, current.ID)
+            if tz.ID == pc[1]:
                 return dt
-            return from_com_date(self.app.TimeZones.ConvertTime(com_date(dt), tz, current))
+            return from_com_date(self.app.TimeZones.ConvertTime(com_date(dt), tz, pc[0]))
         except Exception:
             return dt
 
     def _set_times(self, item, a):
+        """Set an appointment's time zones and times; returns its start zone.
+
+        A meeting received from someone else (state flags, named property
+        8217, with the "received" bit) still ends up in this PC's zone:
+        Outlook resets its zone at every save, whatever is set here or
+        afterwards, and refuses the zone properties written raw. Its times
+        are right; only the zone it's shown in differs from the source."""
         # A repeating series' times are defined in its recurrence time zone;
         # the start "display" zone can differ (or be wrong), so prefer it
+        noted = len(self.warnings)
         if a.get(cal.LID_RECUR):
             tz_start = self._tz(a.get(cal.LID_TZ_RECUR) or a.get(cal.LID_TZ_START_DISPLAY))
         else:
             tz_start = self._tz(a.get(cal.LID_TZ_START_DISPLAY) or a.get(cal.LID_TZ_RECUR))
         tz_end = self._tz(a.get(cal.LID_TZ_END_DISPLAY)) or tz_start
+        # Start and end are usually in the same zone: say it once
+        self.warnings[noted:] = dict.fromkeys(self.warnings[noted:])
         if tz_start is not None:
             item.StartTimeZone = tz_start
             item.EndTimeZone = tz_end
@@ -563,14 +726,14 @@ class PstWriter:
         if is_appt and a.get(cal.LID_RECUR):
             recurrence = cal.parse_recurrence(a[cal.LID_RECUR])  # ValueError -> item fails
 
-        item = folder.Items.Add(kind)
+        item = self._items(folder).Add(kind)
         item.MessageClass = m.message_class
         item.Subject = m.subject
         self._set_item_body(item, m)
         if kind == OL_APPOINTMENT_ITEM:
             # attendees; saving never sends anything
             self._add_recipients(item, m.recipients, "attendees")
-        with self._staging() as tmp:
+        with self._staging(m.attachments) as tmp:
             self._add_attachments(item, m.attachments, tmp)
             self._copy_props(item, props, skip)
             tz = self._set_times(item, a) if is_appt else None
@@ -587,7 +750,7 @@ class PstWriter:
             # Outlook recomputes some fields on save, so apply the raw properties
             # once more on a fresh copy of the item and save again
             del item
-            item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
+            item = self._item(entry_id)
             self._copy_props(item, props, skip)
             item.Save()
         except BaseException:
@@ -606,7 +769,7 @@ class PstWriter:
         didn't: Outlook put that in Drafts.)"""
         mark = f"unbound-remove-{uuid.uuid4().hex}"
         try:
-            item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
+            item = self._item(entry_id)
             item.Subject = mark
             item.Save()
             item.Delete()
@@ -637,43 +800,36 @@ class PstWriter:
         if text:
             item.Body = text
 
-    def _set(self, accessor, label, prop_id, prop_type, value):
-        if value is None or value == "":
-            return
-        try:
-            accessor.SetProperty(mapi.proptag_url(prop_id, prop_type), value)
-        except Exception as e:
-            error = first_line(e, 200)
-            self.property_errors[label] = error
-            # Sender and dates matter to the reader, so flag the item itself
-            self.warnings.append(f"couldn't set the {label} ({error})")
-
     def _set_sender_and_times(self, item, m):
-        pa = item.PropertyAccessor
         S, T = mapi.PT_UNICODE, mapi.PT_SYSTIME
         address = m.sender_email
         # An Exchange sender whose internet address isn't in the source has
         # only a directory address ("/o=.../cn=..."). That's type EX, not an
         # SMTP address, so it mustn't be stored as one.
         addr_type = ("EX" if address.startswith("/") else "SMTP") if address else None
-        for label, pid in (("sender name", mapi.SENDER_NAME),
-                           ("sent-representing name", mapi.SENT_REPRESENTING_NAME)):
-            self._set(pa, label, pid, S, m.sender_name)
-        for label, pid in (("sender address type", mapi.SENDER_ADDRTYPE),
-                           ("sent-representing address type", mapi.SENT_REPRESENTING_ADDRTYPE)):
-            self._set(pa, label, pid, S, addr_type)
-        for label, pid in (("sender email", mapi.SENDER_EMAIL_ADDRESS),
-                           ("sent-representing email", mapi.SENT_REPRESENTING_EMAIL_ADDRESS)):
-            self._set(pa, label, pid, S, address)
-        for label, pid in (("sender SMTP", mapi.SENDER_SMTP_ADDRESS),
-                           ("sent-representing SMTP", mapi.SENT_REPRESENTING_SMTP_ADDRESS)):
-            self._set(pa, label, pid, S, address if _is_smtp(address) else None)
-        self._set(pa, "delivery time", mapi.MESSAGE_DELIVERY_TIME, T, com_date(m.delivery_time))
-        self._set(pa, "submit time", mapi.CLIENT_SUBMIT_TIME, T, com_date(m.submit_time))
+        smtp = address if _is_smtp(address) else None
+        wanted = (
+            ("sender name", mapi.SENDER_NAME, S, m.sender_name),
+            ("sent-representing name", mapi.SENT_REPRESENTING_NAME, S, m.sender_name),
+            ("sender address type", mapi.SENDER_ADDRTYPE, S, addr_type),
+            ("sent-representing address type", mapi.SENT_REPRESENTING_ADDRTYPE, S, addr_type),
+            ("sender email", mapi.SENDER_EMAIL_ADDRESS, S, address),
+            ("sent-representing email", mapi.SENT_REPRESENTING_EMAIL_ADDRESS, S, address),
+            ("sender SMTP", mapi.SENDER_SMTP_ADDRESS, S, smtp),
+            ("sent-representing SMTP", mapi.SENT_REPRESENTING_SMTP_ADDRESS, S, smtp),
+            ("delivery time", mapi.MESSAGE_DELIVERY_TIME, T, com_date(m.delivery_time)),
+            ("submit time", mapi.CLIENT_SUBMIT_TIME, T, com_date(m.submit_time)),
+        )
+        entries = [(mapi.proptag_url(prop_id, prop_type), value, label)
+                   for label, prop_id, prop_type, value in wanted
+                   if value is not None and value != ""]
+        for label, error in self._set_properties(item.PropertyAccessor, entries, together=True):
+            # Sender and dates matter to the reader, so flag the item itself
+            self.warnings.append(f"couldn't set the {label} ({error})")
 
     def add_message(self, folder, m):
         # 1. Create as a PostItem so it is saved as delivered mail, not a draft
-        post = folder.Items.Add(OL_POST_ITEM)
+        post = self._items(folder).Add(OL_POST_ITEM)
         post.Subject = m.subject
         if m.html_body:
             post.HTMLBody = m.html_body
@@ -693,7 +849,7 @@ class PstWriter:
             post.BodyFormat = OL_FORMAT_PLAIN
             post.Body = m.plain_body
 
-        with self._staging() as tmp:
+        with self._staging(m.attachments) as tmp:
             self._add_attachments(post, m.attachments, tmp)
             post.MessageClass = m.message_class
             post.Save()
@@ -703,7 +859,7 @@ class PstWriter:
         # 2. Reopen it: now it's a MailItem, so it takes real recipients.
         #    Times are set here because the first save overwrites them.
         try:
-            item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
+            item = self._item(entry_id)
             self._add_recipients(item, m.recipients, "recipients")
             self._set_sender_and_times(item, m)
             item.UnRead = not m.is_read
@@ -734,7 +890,7 @@ class PstWriter:
                 self._drop_references()
             return
         try:
-            _detach_within(self.pst_path, timeout)
+            _detach_within([self.pst_path], timeout)
         except DetachTimeout:
             # Releasing these would wait on the same unanswering Outlook
             _stuck_references.append((self.root, self.store, self.ns, self.app))
@@ -766,9 +922,10 @@ class DetachTimeout(DetachError):
     pass
 
 
-def _detach_within(pst_path, timeout):
-    """Detach pst_path from the profile through a connection to Outlook of
-    this thread's own, waiting at most timeout seconds."""
+def _detach_within(paths, timeout, raise_errors=True):
+    """Detach these PSTs from the profile through a connection to Outlook
+    made on a thread of its own, waiting at most timeout seconds. Returns
+    the paths that were attached."""
     outcome = {}
 
     def work():
@@ -776,7 +933,7 @@ def _detach_within(pst_path, timeout):
         try:
             ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
             # A PST that isn't attached any more (Outlook let go of it) is fine
-            _detach(ns, [pst_path], raise_errors=True)
+            outcome["removed"] = _detach(ns, paths, raise_errors=raise_errors)
             del ns
         except Exception as e:
             outcome["error"] = e
@@ -797,6 +954,7 @@ def _detach_within(pst_path, timeout):
                             f"from it (waited {_minutes(timeout)})")
     if "error" in outcome:
         raise DetachError(f"Outlook couldn't detach the PST: {first_line(outcome['error'], 200)}")
+    return outcome.get("removed", [])
 
 
 def _minutes(seconds):

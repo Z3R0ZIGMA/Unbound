@@ -236,6 +236,7 @@ class Result:
     still_attached: str = ""  # why the PST couldn't be detached from Outlook at the end
     source_in_use_by: list = field(default_factory=list)  # programs that had the source open
     seconds: float = 0.0
+    phases: dict = field(default_factory=dict)  # step -> seconds, for the log
     skipped_attached_emails: int = 0
     # Diagnostics for the log: what kinds of folders and items were met
     folder_types: Counter = field(default_factory=Counter)
@@ -528,6 +529,14 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     reader = writer = None
     done = 0
     run = _Run(pst_path)
+    mark = [start]
+
+    def phase(name):
+        """Note how long the step just finished took, for the log."""
+        now = time.time()
+        result.phases[name] = result.phases.get(name, 0.0) + now - mark[0]
+        mark[0] = now
+
     try:
         # Outlook locks the OST of its own profile as soon as it starts, and we
         # start Outlook to write the PST. So read such files from a copy taken
@@ -545,6 +554,7 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 progress(0, total, "Making a working copy of the OST…")
             read_path = _working_copy(ost_path, run.dir,
                                       progress and _copy_reporter(progress, total), should_cancel)
+            phase("working copy")
 
         if mbox:
             reader, tree = _MboxReader(), _scan_mbox(read_path)
@@ -554,9 +564,11 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
         # Folder kind for every path, so parents of a calendar or contacts
         # folder are created with the right type too
         kinds_by_path = {n.path: n.kind for top in tree for n in top.walk()}
+        phase("opening the source")
         name = os.path.splitext(os.path.basename(os.path.normpath(ost_path)))[0]
         writer = outlook_writer or PstWriter(pst_path, display_name=name,
                                              temp_dir=run.dir, detach=detach)
+        phase("starting Outlook")
 
         for node in selected:
             if not node.item_count:
@@ -621,6 +633,8 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
         result.cancelled = True
     finally:
         result.seconds = time.time() - start
+        if writer is not None:
+            phase("copying items")
         try:
             if reader is not None:
                 reader.close()
@@ -638,6 +652,7 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                         writer.close(timeout=DETACH_TIMEOUT)
                     except DetachError as e:
                         result.still_attached = str(e)
+                    phase("detaching from Outlook")
             finally:
                 run.close()
     return result
@@ -692,7 +707,13 @@ def write_log(result, ost_path, pst_path, log_path):
         if result.skipped_attached_emails:
             fh.write(f"Emails attached to other items, not copied yet: "
                      f"{result.skipped_attached_emails}\n")
-        fh.write(f"Time: {result.seconds:.0f}s\n\n")
+        fh.write(f"Time: {result.seconds:.0f}s\n")
+        if result.phases:
+            # Starting Outlook alone can take from a second to a minute, so
+            # the total says little about the speed of the copying
+            fh.write("Where the time went: " + ", ".join(
+                f"{name} {seconds:.0f}s" for name, seconds in result.phases.items()) + "\n")
+        fh.write("\n")
 
         def counts(title, counter):
             fh.write(f"{title}\n")

@@ -75,6 +75,23 @@ class NotDetached(TempDir):
         self.assertIn("Not detached from Outlook: Outlook stopped responding.", text)
         self.assertIn("Copied: 2", text)
 
+    def test_the_log_says_where_the_time_went(self):
+        """The total alone can't show whether Outlook's start or the copying
+        was slow: starting Outlook varies from a second to a minute."""
+        export = os.path.join(self.dir, "export")
+        self.write("export/Inbox.mbox/mbox", mbox(b"Subject: one\n\nx\n"))
+        nodes = [n for top in scan_folders(export) for n in top.walk()]
+        pst = os.path.join(self.dir, "out.pst")
+        with mock.patch("unbound.pst_writer.PstWriter", return_value=FakeWriter()):
+            result = convert(export, pst, nodes)
+        self.assertEqual(list(result.phases), ["opening the source", "starting Outlook",
+                                               "copying items", "detaching from Outlook"])
+        log = os.path.join(self.dir, "log.txt")
+        write_log(result, export, pst, log)
+        with open(log, encoding="utf-8") as fh:
+            self.assertIn("Where the time went: opening the source 0s, starting Outlook 0s, "
+                          "copying items 0s, detaching from Outlook 0s\n", fh.read())
+
 
 class LogLines(TempDir):
     """F15: a line break in a subject could write fake lines into the log."""

@@ -65,6 +65,27 @@ def self_check(report_path):
         ok = False
         lines.append(f"FAIL dates through COM: {e}")
 
+    # Outlook's objects are wrapped so that what's learnt about a type is
+    # shared (pst_writer._Dispatch). That leans on pywin32's insides, so try
+    # it with a COM object every Windows has
+    try:
+        import win32com.client
+        from unbound.pst_writer import _Dispatch, _wrap
+        types = {}
+        first, second = (_wrap(types, win32com.client.Dispatch("Scripting.Dictionary")._oleobj_)
+                         for _ in range(2))
+        first.Add("a", 1)
+        second.Add("b", 2)
+        shared = isinstance(second, _Dispatch) and second._olerepr_ is first._olerepr_
+        if shared and (first.Count, second.Count, second.Item("b")) == (1, 1, 2):
+            lines.append("OK   shared COM types")
+        else:
+            ok = False
+            lines.append("FAIL shared COM types: objects of one type don't share")
+    except Exception as e:
+        ok = False
+        lines.append(f"FAIL shared COM types: {e}")
+
     # Not a failure when missing: Windows before 10 (1903) has no ICU, and
     # such appointments then keep their times but not their time zone name
     try:

@@ -1,9 +1,11 @@
 """PstWriter's dealings with Outlook, against stand-ins (tests/fake_outlook.py)
 that behave as Outlook was seen to in the 1.3.3 review."""
 
+import os
 import threading
 import time
 import unittest
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
@@ -11,6 +13,7 @@ from unittest import mock
 from tests import fake_outlook as fo
 from unbound import appointment as cal
 from unbound import pst_writer
+from unbound.props import Prop
 from unbound.pst_writer import PstWriter, _detach, html_to_text, rtf_to_text
 
 
@@ -228,6 +231,181 @@ class Notes(unittest.TestCase):
         item = fo.Item()
         bare_writer()._set_item_body(item, message(rtf_body=b"{\\rtf1 hi}\r\n\x00\x00"))
         self.assertEqual(item.RTFBody, b"{\\rtf1 hi}")
+
+
+class SharedTypeDescriptions(unittest.TestCase):
+    """pywin32 asks a COM server to describe every new object afresh. With
+    Outlook that was about half the time an email took, so objects of one
+    type now share what's been learnt. Tried here with a COM object every
+    Windows PC has."""
+
+    def setUp(self):
+        raw = pst_writer.win32com.client.Dispatch("Scripting.FileSystemObject")
+        self.types = {}
+        self.fso = pst_writer._wrap(self.types, raw._oleobj_, "FileSystemObject")
+
+    def test_objects_of_one_type_share_what_is_known(self):
+        a = self.fso.GetSpecialFolder(2)  # what a method returns...
+        b = self.fso.GetSpecialFolder(2)
+        self.assertIsInstance(a, pst_writer._Dispatch)
+        self.assertIs(a._olerepr_, b._olerepr_)
+        self.assertIs(a._builtMethods_, b._builtMethods_)
+        self.assertEqual(a.Path, b.Path)
+        self.assertTrue(os.path.isdir(a.Path))
+        drives = self.fso.Drives          # ...and a property's value
+        self.assertIsInstance(drives, pst_writer._Dispatch)
+        self.assertGreaterEqual(drives.Count, 1)
+        self.assertIs(a._types_, self.types)
+
+    def test_still_works_like_an_ordinary_object(self):
+        folder = self.fso.GetSpecialFolder(2)
+        name = "unbound-test-" + uuid.uuid4().hex
+        made = folder.SubFolders.Add(name)        # a method with an argument
+        try:
+            self.assertTrue(self.fso.FolderExists(made.Path))
+            self.assertEqual(made.Name, name)
+        finally:
+            made.Delete()
+        self.assertFalse(self.fso.FolderExists(os.path.join(folder.Path, name)))
+
+    def test_outlooks_stand_in_is_left_alone(self):
+        app = fo.App(fo.Namespace())
+        with mock.patch.object(pst_writer.win32com.client, "Dispatch", return_value=app):
+            self.assertIs(pst_writer._outlook(), app)
+
+
+URL = "http://schemas.microsoft.com/mapi/proptag/0x"
+
+
+class SettingProperties(unittest.TestCase):
+    """An email's sender and dates go to Outlook in one call. Copied
+    properties never do: such a call crashed Outlook on a contact."""
+
+    def entries(self):
+        return [(URL + "0C1A001F", "Ann", "sender name"), (URL + "0E060040", "date", "delivery time"),
+                (URL + "0C1F001F", "ann@example.test", "sender email")]
+
+    def test_one_call_when_asked(self):
+        pa, w = fo.PropertyAccessor(), bare_writer()
+        self.assertEqual(w._set_properties(pa, self.entries(), together=True), [])
+        self.assertEqual([kind for kind, _ in pa.calls], ["batch"])
+        self.assertEqual(pa.values[URL + "0C1A001F"], "Ann")
+
+    def test_a_refusal_is_asked_about_again_for_its_text_once(self):
+        pa, w = fo.PropertyAccessor(refuse={URL + "0E060040"}), bare_writer()
+        refused = w._set_properties(pa, self.entries(), together=True)
+        self.assertEqual([label for label, _ in refused], ["delivery time"])
+        self.assertIn("does not support", w.property_errors["delivery time"])
+        self.assertEqual(pa.calls[1], ("one", URL + "0E060040"))
+        self.assertEqual(pa.values[URL + "0C1F001F"], "ann@example.test")  # the rest were set
+        pa.calls.clear()
+        again = w._set_properties(pa, self.entries(), together=True)   # the next email
+        self.assertEqual(again, refused)
+        self.assertEqual([kind for kind, _ in pa.calls], ["batch"])    # the text is known by now
+
+    def test_falls_back_to_one_by_one(self):
+        pa, w = fo.PropertyAccessor(batches_fail=True), bare_writer()
+        self.assertEqual(w._set_properties(pa, self.entries(), together=True), [])
+        self.assertEqual([kind for kind, _ in pa.calls], ["batch", "one", "one", "one"])
+        self.assertEqual(len(pa.values), 3)
+
+    def test_copied_properties_go_one_by_one(self):
+        props = [Prop(0x3A17, 0x1F, None, "Room 5"), Prop(0x3A42, 0x40, None, datetime(2001, 2, 3)),
+                 Prop(0x003F, 0x102, None, b"\x01")]
+        item = fo.Item()
+        item.PropertyAccessor = fo.PropertyAccessor(refuse={URL + "003F0102"})
+        w = bare_writer()
+        self.assertEqual(w._copy_props(item, props), (2, 1))
+        self.assertEqual([kind for kind, _ in item.PropertyAccessor.calls], ["one", "one", "one"])
+        self.assertIn("0x003F0102", w.property_errors)
+
+    def test_a_sender_field_outlook_refuses_is_flagged_on_the_email(self):
+        item = fo.Item()
+        item.PropertyAccessor = fo.PropertyAccessor(refuse={URL + "0C1A001F"})
+        w = bare_writer()
+        w._set_sender_and_times(item, message(sender_name="Ann", sender_email="ann@example.test",
+                                              delivery_time=datetime(2026, 3, 2, 10, 0)))
+        self.assertEqual(len(w.warnings), 1)
+        self.assertIn("sender name", w.warnings[0])
+        self.assertEqual(item.PropertyAccessor.values[URL + "0C1F001F"], "ann@example.test")
+        self.assertNotIn(URL + "00390040", item.PropertyAccessor.values)  # no submit time given
+
+
+class SmallSavings(unittest.TestCase):
+    def test_no_temporary_folder_without_attachments(self):
+        w = bare_writer()
+        w.temp_dir = None
+        with mock.patch.object(pst_writer.tempfile, "TemporaryDirectory") as made:
+            with w._staging([]) as tmp:
+                self.assertIsNone(tmp)
+        made.assert_not_called()
+        with w._staging([object()]) as tmp:
+            self.assertTrue(os.path.isdir(tmp))
+        self.assertFalse(os.path.exists(tmp))
+
+    def test_store_id_is_asked_for_once(self):
+        w = bare_writer()
+        asked = []
+
+        class Store:
+            @property
+            def StoreID(self):
+                asked.append(1)
+                return "S"
+        w.store = Store()
+        w.ns = SimpleNamespace(GetItemFromID=lambda entry, store: (entry, store))
+        self.assertEqual([w._item("E1"), w._item("E2")], [("E1", "S"), ("E2", "S")])
+        self.assertEqual(len(asked), 1)
+
+    def test_each_time_zone_is_looked_up_once(self):
+        looked_up = []
+
+        def zone(name):
+            looked_up.append(name)
+            if name != "South Africa Standard Time":
+                raise fo.OutlookError("not found")
+            return "zone object"
+        w = bare_writer()
+        w.app = SimpleNamespace(TimeZones=SimpleNamespace(Item=zone))
+        with mock.patch.object(pst_writer.cal, "tz_key_name", side_effect=lambda blob: blob), \
+                mock.patch.object(pst_writer, "windows_zone", return_value=None):
+            self.assertEqual([w._tz("South Africa Standard Time") for _ in range(3)],
+                             ["zone object"] * 3)
+            self.assertEqual([w._tz("Nowhere/Zone") for _ in range(2)], [None, None])
+        self.assertEqual(looked_up, ["South Africa Standard Time", "Nowhere/Zone"])
+        self.assertEqual(len(w.warnings), 2)  # an unknown zone is still noted on each item
+
+    def zones_writer(self):
+        """Outlook's TimeZones, which answers with nothing (not an error)
+        for a name it doesn't know."""
+        w = bare_writer()
+        w.app = SimpleNamespace(TimeZones=SimpleNamespace(
+            Item=lambda name: "SAST zone" if name == "South Africa Standard Time" else None))
+        return w
+
+    def test_a_phone_style_zone_name_is_translated(self):
+        """'Africa/Johannesburg' used to be given up on, silently: Outlook's
+        empty answer was taken for a zone, so the Windows name was never
+        tried. Found in a real mailbox, where some 40 appointments had it."""
+        w = self.zones_writer()
+        names = {"Africa/Johannesburg": "South Africa Standard Time"}
+        with mock.patch.object(pst_writer.cal, "tz_key_name", side_effect=lambda blob: blob), \
+                mock.patch.object(pst_writer, "windows_zone", side_effect=names.get):
+            self.assertEqual(w._tz("Africa/Johannesburg"), "SAST zone")
+            self.assertIsNone(w._tz("(no TZ description)"))
+        self.assertEqual(w.warnings, ["time zone '(no TZ description)' not known to this PC"])
+
+    def test_an_unknown_zone_is_noted_once_per_appointment(self):
+        w = self.zones_writer()
+        item = SimpleNamespace()
+        a = {cal.LID_TZ_START_DISPLAY: "Nowhere/Zone", cal.LID_TZ_END_DISPLAY: "Nowhere/Zone"}
+        with mock.patch.object(pst_writer.cal, "tz_key_name", side_effect=lambda blob: blob), \
+                mock.patch.object(pst_writer, "windows_zone", return_value=None):
+            w.warnings.append("an earlier item's warning")
+            self.assertIsNone(w._set_times(item, a))
+            self.assertIsNone(w._set_times(item, a))  # the next appointment
+        self.assertEqual(w.warnings, ["an earlier item's warning"]
+                         + ["time zone 'Nowhere/Zone' not known to this PC"] * 2)
 
 
 class Recipients(unittest.TestCase):

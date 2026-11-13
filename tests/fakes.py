@@ -53,7 +53,7 @@ class FakeWriter:
     def add_item(self, folder, kind, m, props):
         self.items.append((folder, kind, m.subject))
 
-    def close(self):
+    def close(self, quit_outlook=False, timeout=None):
         self.closed = True
 
 
