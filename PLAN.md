@@ -81,7 +81,7 @@ Next candidates:
 - **1.3.1:** the first published build of 1.3. The 1.3.0 tag has no release: all its tests passed, but the test process crashed as it exited (windows left over from the tests), which stopped the build. Only the tests changed
 - **1.3.2:** a mailbox that other programs have open can be converted. Word and Excel hold the Outlook profile's OST open while they run (so do Teams and Windows Search) and lock part of it, and Unbound reported "Outlook is using this file" although Outlook was closed. It now asks Windows which programs have the file open (Restart Manager) and names them. If Outlook isn't among them it reads past the lock: Windows applies such locks to ordinary reads but not to a memory-mapped view, so the folder scan reads through one and the working copy is taken through one. If Outlook has the file, it's still refused, because Outlook changes the file as it syncs; the message then offers to close Outlook, for when it's running without a window. Tested with a real lock held by a second program (scan, working copy, a full conversion compared item by item) and by scanning a real OST while Word and Excel had it open; the "Close Outlook" button is tested with a stand-in, not against a live Outlook
 - **1.3.3:** fixes and small improvements from a second review of the code and from converting a real OST; see "Version 1.3.3" below. Also the MIT License, and the first release with a build attestation
-- **1.3.4 (not released yet):** roughly twice as fast for mail, and three fixes; see "Version 1.3.4" below
+- **1.3.4:** roughly twice as fast, phone-style time zone names translated, and three fixes in the window; see "Version 1.3.4" below
 
 ## Risks and first steps
 
