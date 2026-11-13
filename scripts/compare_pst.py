@@ -10,8 +10,9 @@ has one with the same details:
   appointments:  subject, start, end, all-day, full recurrence (pattern,
                  cancelled and changed occurrences), notes
   contacts:      name, email address, notes
-Notes are compared as text (formatting ignored): Outlook stores appointment
-notes as HTML, which Unbound can only write back as text.
+Notes are compared as text (formatting ignored, and invisible characters
+such as soft hyphens too): Outlook stores appointment notes as HTML, which
+Unbound can only write back as text.
 Also reports how many source items of each kind are missing from OUTPUT
 (only meaningful if every folder was converted). Prints counts only, never
 message content. Exit code 0 if everything in OUTPUT matches its source.
@@ -21,6 +22,7 @@ import collections
 from datetime import timedelta
 import os
 import sys
+import unicodedata
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -54,8 +56,13 @@ def _second(dt):
 
 
 def _notes(m):
-    """An item's notes as plain words, whatever form they're stored in."""
-    text = m.plain_body or (html_to_text(m.html_body) if m.html_body else "")         or (rtf_to_text(m.rtf_body) if m.rtf_body else "")
+    """An item's notes as plain words, whatever form they're stored in.
+    Invisible formatting characters (soft hyphens, text-direction marks)
+    are left out: Outlook drops or changes some of them when it saves the
+    text, and they don't change what the notes say."""
+    text = (m.plain_body or (html_to_text(m.html_body) if m.html_body else "")
+            or (rtf_to_text(m.rtf_body) if m.rtf_body else ""))
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
     return " ".join(text.split())
 
 

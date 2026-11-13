@@ -104,13 +104,21 @@ class Pattern:
     """A RecurrencePattern that records what's set. Like Outlook, a yearly
     pattern refuses an Interval below 12: it counts it in months."""
 
-    def __init__(self):
-        self.set = {}
+    def __init__(self, derived=None):
+        # derived: what Outlook works out from the start once RecurrenceType
+        # is set, and then refuses to be told again (seen for a yearly series
+        # on 29 February: day 29, month 2, interval 12)
+        object.__setattr__(self, "set", {})
+        object.__setattr__(self, "derived", derived or {})
+
+    def __getattr__(self, name):
+        if self.set.get("RecurrenceType") is not None and name in self.derived:
+            return self.derived[name]
+        raise AttributeError(name)
 
     def __setattr__(self, name, value):
-        if name == "set":
-            object.__setattr__(self, name, value)
-            return
+        if name in self.derived and self.set.get("RecurrenceType") is not None:
+            raise OutlookError("The recurrence pattern is not valid.")
         if name == "Interval" and self.set.get("RecurrenceType") in (5, 6) and value < 12:
             raise OutlookError("The recurrence pattern is not valid.")
         self.set[name] = value
@@ -180,4 +188,25 @@ class Item:
         self.saved += 1
 
     def Delete(self):
+        """Like Outlook in a PST: the item goes to Deleted Items (a new
+        object there), unless it's already in it."""
         self.deleted = True
+        bin_ = self.__dict__.get("deleted_items")
+        if bin_ is not None:
+            copy = Item(self.EntryID + "-in-bin")
+            copy.Subject = getattr(self, "Subject", "")
+            bin_.list.append(copy)
+
+
+class DeletedItems:
+    """A Deleted Items folder whose Items.Find matches on Subject."""
+
+    def __init__(self):
+        self.list = []
+        self.Items = self
+
+    def Find(self, restriction):
+        for item in self.list:
+            if restriction == f"[Subject] = '{item.Subject}'":
+                return item
+        return None

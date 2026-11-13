@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .converter import (
-    CALENDAR, CONTACTS, MAIL, PST_SIZE_LIMIT, convert, estimated_pst_size,
+    CALENDAR, CONTACTS, MAIL, PST_SIZE_LIMIT, STILL_ATTACHED_ADVICE, convert, estimated_pst_size,
     is_outlook_data_file, log_path_for, recover_interrupted, scan_folders,
     write_failure_log, write_log,
 )
@@ -796,13 +796,16 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QMessageBox.Warning if result.failures or result.cancelled or result.stopped
-                    or result.skipped_attached_emails else QMessageBox.Information)
+                    or result.skipped_attached_emails or result.still_attached
+                    else QMessageBox.Information)
         if result.stopped:
             detail = result.stopped + " What was copied before that is in the PST."
         elif result.failures:
             detail = "Some items couldn't be converted; they're listed in the log."
         else:
             detail = ""
+        if result.still_attached:
+            detail = (f"{detail} {result.still_attached}. {STILL_ATTACHED_ADVICE}").strip()
         box.setText(f"{word}. {detail}")
         box.setInformativeText("\n".join(lines))
         show_btn = box.addButton("Show PST in folder", QMessageBox.ActionRole)

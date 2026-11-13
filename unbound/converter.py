@@ -233,6 +233,7 @@ class Result:
     warnings: list = field(default_factory=list)  # items copied only partly
     cancelled: bool = False
     stopped: str = ""  # why the run ended early by itself (the source became unreadable)
+    still_attached: str = ""  # why the PST couldn't be detached from Outlook at the end
     source_in_use_by: list = field(default_factory=list)  # programs that had the source open
     seconds: float = 0.0
     skipped_attached_emails: int = 0
@@ -511,7 +512,8 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
     """
     from .pff_process import PffProcess, ReaderLost
     from .pst_writer import (
-        OL_APPOINTMENT_ITEM, OL_CONTACT_ITEM, OL_FOLDER_CALENDAR, OL_FOLDER_CONTACTS, PstWriter,
+        DETACH_TIMEOUT, OL_APPOINTMENT_ITEM, OL_CONTACT_ITEM, OL_FOLDER_CALENDAR,
+        OL_FOLDER_CONTACTS, DetachError, PstWriter,
     )
     folder_type = {CALENDAR: OL_FOLDER_CALENDAR, CONTACTS: OL_FOLDER_CONTACTS}
     item_type = {CALENDAR: OL_APPOINTMENT_ITEM, CONTACTS: OL_CONTACT_ITEM}
@@ -627,10 +629,25 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                 if writer is not None:
                     result.refused_properties = dict(writer.property_errors)
                 if writer is not None and outlook_writer is None:
-                    writer.close()  # always detach the PST from the profile
+                    # Always detach the PST from the profile. If Outlook won't,
+                    # what was copied is still in the PST: say so rather than
+                    # report the whole run as failed
+                    if progress:
+                        progress(0, total, "Detaching the PST from Outlook…")
+                    try:
+                        writer.close(timeout=DETACH_TIMEOUT)
+                    except DetachError as e:
+                        result.still_attached = str(e)
             finally:
                 run.close()
     return result
+
+
+STILL_ATTACHED_ADVICE = (
+    "Everything copied is in the PST, but it may still be open in Outlook. If Outlook "
+    "lists it as an extra data file, right-click its name in the folder list and "
+    "choose Close. If Outlook can't open the PST, run Outlook's Inbox Repair Tool "
+    "(SCANPST.EXE) on it.")
 
 
 def _one_line(text):
@@ -661,6 +678,9 @@ def write_log(result, ost_path, pst_path, log_path):
                  f"{'  (cancelled)' if result.cancelled else ''}\n")
         if result.stopped:
             fh.write(f"Stopped early: {result.stopped}\n")
+        if result.still_attached:
+            fh.write(f"Not detached from Outlook: {_one_line(result.still_attached)}. "
+                     f"{STILL_ATTACHED_ADVICE}\n")
         if result.source_in_use_by:
             fh.write(f"The source was open in {', '.join(result.source_in_use_by)}; "
                      f"it was converted from a copy taken at the start.\n")

@@ -275,6 +275,7 @@ class Improvements(WindowCase):
 
         def capture(box):
             shown["text"], shown["icon"] = box.informativeText(), box.icon()
+            shown["headline"] = box.text()
             return 0
         with mock.patch.object(QMessageBox, "exec", capture):
             self.win.on_converted(result, "")
@@ -285,6 +286,12 @@ class Improvements(WindowCase):
         self.assertIn("Emails attached to other emails, not copied yet: 3", shown["text"])
         self.assertEqual(shown["icon"], QMessageBox.Warning)
         self.assertEqual(self.finished()["icon"], QMessageBox.Information)
+
+    def test_a_pst_left_attached_to_outlook_is_explained(self):
+        shown = self.finished(still_attached="Outlook stopped responding")
+        self.assertEqual(shown["icon"], QMessageBox.Warning)
+        self.assertIn("Outlook stopped responding.", shown["headline"])
+        self.assertIn("choose Close", shown["headline"])
 
     def test_plain_english_when_a_file_cannot_be_opened(self):  # QW3
         empty = os.path.join(self.dir, "empty.ost")

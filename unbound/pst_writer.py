@@ -11,10 +11,14 @@ import html
 import os
 import re
 import tempfile
+import threading
+import time
 import unicodedata
+import uuid
 from datetime import timedelta, timezone
 from html.parser import HTMLParser
 
+import pythoncom
 import win32com.client
 
 from . import appointment as cal
@@ -34,6 +38,7 @@ OL_BY_VALUE = 1  # olByValue
 OL_FORMAT_PLAIN = 1  # olFormatPlain
 OL_FOLDER_CALENDAR = 9  # olFolderCalendar
 OL_FOLDER_CONTACTS = 10  # olFolderContacts
+OL_FOLDER_DELETED_ITEMS = 3  # olFolderDeletedItems
 ATTACH_CONTENT_ID = 0x3712  # PR_ATTACH_CONTENT_ID
 
 # Properties that belong to the source file or that Outlook computes itself;
@@ -253,23 +258,38 @@ def _stores_newest_first(ns):
         yield store, path
 
 
-def _detach(ns, paths):
+def _set_if_changed(obj, name, value):
+    try:
+        if getattr(obj, name) == value:
+            return
+    except Exception:
+        pass  # can't be read: set it
+    setattr(obj, name, value)
+
+
+def _detach(ns, paths, raise_errors=False):
     """Detach these PST files from the Outlook profile where they're
-    attached (the files stay on disk). Returns the paths that were."""
+    attached (the files stay on disk). Returns the paths that were.
+    Errors are stepped over unless raise_errors is set."""
     want = {os.path.normcase(os.path.abspath(p)) for p in paths}
     removed = []
     if not want:
         return removed
     try:
         for store, path in list(_stores_newest_first(ns)):
+            if not (path and os.path.normcase(os.path.abspath(path)) in want):
+                continue
             try:
-                if path and os.path.normcase(os.path.abspath(path)) in want:
-                    ns.RemoveStore(store.GetRootFolder())
-                    removed.append(path)
+                ns.RemoveStore(store.GetRootFolder())
+                removed.append(path)
             except Exception:
-                continue  # a store Outlook won't let go of
+                if raise_errors:
+                    raise
+                # a store Outlook won't let go of
     except Exception:
-        pass  # Outlook couldn't even say how many stores there are
+        if raise_errors:
+            raise
+        # Outlook couldn't even say how many stores there are
     return removed
 
 
@@ -470,20 +490,24 @@ class PstWriter:
             raise ValueError("this kind of repeat (e.g. Hijri calendar) isn't supported")
         rp = item.GetRecurrencePattern()
         rp.RecurrenceType = ol_type
+        # Each part is set only if Outlook hasn't already worked it out from
+        # the start: for a yearly series on 29 February it refuses even to
+        # be told the day, month or interval it already has
         if ol_type in (cal.OL_WEEKLY, cal.OL_MONTH_NTH, cal.OL_YEAR_NTH):
-            rp.DayOfWeekMask = r.day_of_week_mask
+            _set_if_changed(rp, "DayOfWeekMask", r.day_of_week_mask)
         if ol_type in (cal.OL_MONTH_NTH, cal.OL_YEAR_NTH):
-            rp.Instance = r.instance
+            _set_if_changed(rp, "Instance", r.instance)
         if ol_type in (cal.OL_MONTHLY, cal.OL_YEARLY):
-            rp.DayOfMonth = 31 if r.pattern_type == cal.PT_MONTH_END else r.day_of_month
+            _set_if_changed(rp, "DayOfMonth",
+                            31 if r.pattern_type == cal.PT_MONTH_END else r.day_of_month)
         if ol_type in (cal.OL_YEARLY, cal.OL_YEAR_NTH):
-            rp.MonthOfYear = r.start_date.month
+            _set_if_changed(rp, "MonthOfYear", r.start_date.month)
         if ol_type in (cal.OL_YEARLY, cal.OL_YEAR_NTH):
             # Outlook counts a yearly interval in months (12 = every year,
             # 24 = every two) and refuses 1 or 2 as "not valid"
-            rp.Interval = 12 * r.interval()
+            _set_if_changed(rp, "Interval", 12 * r.interval())
         else:
-            rp.Interval = r.interval()
+            _set_if_changed(rp, "Interval", r.interval())
         rp.PatternStartDate = com_date(r.start_date)
         if not item.AllDayEvent:
             rp.StartTime = com_date(r.start_date + timedelta(minutes=r.start_offset))
@@ -574,10 +598,28 @@ class PstWriter:
         return item
 
     def _delete_saved(self, entry_id):
+        """Remove an item for good. Delete() only moves it to the PST's
+        Deleted Items (where a failed birthday series was found, saved
+        without its pattern), and Outlook doesn't say where it went. So it's
+        marked first, found there by the mark and deleted again, which
+        removes it. (Moving it to Deleted Items and deleting the moved copy
+        didn't: Outlook put that in Drafts.)"""
+        mark = f"unbound-remove-{uuid.uuid4().hex}"
         try:
-            self.ns.GetItemFromID(entry_id, self.store.StoreID).Delete()
+            item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
+            item.Subject = mark
+            item.Save()
+            item.Delete()
+            del item
         except Exception:
-            pass  # best effort; the failure itself is what gets reported
+            return  # best effort; the failure itself is what gets reported
+        try:
+            bin_ = self.store.GetDefaultFolder(OL_FOLDER_DELETED_ITEMS)
+            found = bin_.Items.Find(f"[Subject] = '{mark}'")
+            if found is not None:
+                found.Delete()
+        except Exception:
+            pass  # left in Deleted Items, under the mark
 
     def _set_item_body(self, item, m):
         """An appointment's or contact's notes. Outlook writes appointment
@@ -673,14 +715,91 @@ class PstWriter:
             raise
         return item
 
-    def close(self, quit_outlook=False):
-        """Detach the PST from the Outlook profile (the file stays on disk)."""
+    def close(self, quit_outlook=False, timeout=None):
+        """Detach the PST from the Outlook profile (the file stays on disk).
+
+        With a timeout (seconds), Outlook is asked from a thread of its own,
+        and DetachError is raised if it hasn't answered by then or refuses.
+        An Outlook started in the background was seen to stop answering
+        altogether at this point, while Microsoft 365 was down for its
+        Exchange account, which left the window at 100% for ever. The request stays queued, so Outlook may still detach the PST
+        once it recovers.
+        """
+        if timeout is None:
+            try:
+                self.ns.RemoveStore(self.root)
+            finally:
+                if quit_outlook:
+                    self.app.Quit()
+                self._drop_references()
+            return
         try:
-            self.ns.RemoveStore(self.root)
-        finally:
-            if quit_outlook:
-                self.app.Quit()
-            # Drop every COM reference; Outlook keeps the PST open while
-            # any are alive.
+            _detach_within(self.pst_path, timeout)
+        except DetachTimeout:
+            # Releasing these would wait on the same unanswering Outlook
+            _stuck_references.append((self.root, self.store, self.ns, self.app))
             self.root = self.store = self.ns = self.app = None
+            raise
+        except BaseException:
+            self._drop_references()
+            raise
+        if quit_outlook:
+            self.app.Quit()
+        self._drop_references()
+
+    def _drop_references(self):
+        # Drop every COM reference; Outlook keeps the PST open while any are
+        # alive.
+        self.root = self.store = self.ns = self.app = None
+        gc.collect()
+
+
+DETACH_TIMEOUT = 180  # seconds Outlook gets to detach the PST at the end
+_stuck_references = []  # COM references to an Outlook that stopped answering
+
+
+class DetachError(Exception):
+    """The PST couldn't be detached from the Outlook profile."""
+
+
+class DetachTimeout(DetachError):
+    pass
+
+
+def _detach_within(pst_path, timeout):
+    """Detach pst_path from the profile through a connection to Outlook of
+    this thread's own, waiting at most timeout seconds."""
+    outcome = {}
+
+    def work():
+        pythoncom.CoInitialize()
+        try:
+            ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+            # A PST that isn't attached any more (Outlook let go of it) is fine
+            _detach(ns, [pst_path], raise_errors=True)
+            del ns
+        except Exception as e:
+            outcome["error"] = e
+        finally:
             gc.collect()
+            pythoncom.CoUninitialize()
+
+    thread = threading.Thread(target=work, daemon=True, name="unbound-detach")
+    thread.start()
+    # Keep handling this thread's COM messages while waiting, as a thread
+    # holding COM objects should, in case Outlook calls back into it
+    deadline = time.monotonic() + timeout
+    while thread.is_alive() and time.monotonic() < deadline:
+        pythoncom.PumpWaitingMessages()
+        thread.join(0.05)
+    if thread.is_alive():
+        raise DetachTimeout(f"Outlook stopped responding while the PST was being detached "
+                            f"from it (waited {_minutes(timeout)})")
+    if "error" in outcome:
+        raise DetachError(f"Outlook couldn't detach the PST: {first_line(outcome['error'], 200)}")
+
+
+def _minutes(seconds):
+    if seconds < 120:
+        return f"{seconds:g} seconds"
+    return f"{seconds / 60:g} minutes"

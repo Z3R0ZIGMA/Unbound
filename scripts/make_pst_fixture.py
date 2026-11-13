@@ -8,7 +8,8 @@ real mailbox: convert OUTPUT.pst with Unbound, then compare the two with
 compare_pst.py. It holds a one-off appointment, an all-day event, a meeting
 with attendees, a weekly series with a cancelled and a moved occurrence, a
 monthly series with an end date, a yearly "second Tuesday of March" series
-with notes, a series every two years, and two contacts. Outlook stores the
+with notes, a series every two years, a yearly birthday on 29 February,
+and two contacts. Outlook stores the
 appointments' notes as HTML only, which is what the notes check relies on.
 
 Needs Outlook Classic. Nothing is ever sent: the items are only saved, the
@@ -108,6 +109,17 @@ def build(root):
     pattern.MonthOfYear = 4
     pattern.PatternStartDate = com_date(datetime(2027, 4, 1))
     pattern.Occurrences = 5
+    a.Save()
+
+    # A birthday on 29 February. Outlook works out the day and month from
+    # the start and refuses to be told them, which once made such a series
+    # fail to convert
+    a = appointment(calendar, "Leap-day birthday", datetime(2028, 2, 29), 0)
+    a.AllDayEvent = True
+    pattern = a.GetRecurrencePattern()
+    pattern.RecurrenceType = OL_YEARLY
+    pattern.PatternStartDate = com_date(datetime(2028, 2, 29))
+    pattern.NoEndDate = True
     a.Save()
 
     for first, last, email, company in (("Alice", "Müller", "alice@example.test", "Example GmbH"),

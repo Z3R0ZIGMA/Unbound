@@ -7,9 +7,10 @@ import time
 import unittest
 from unittest import mock
 
-from tests.fakes import DiesWhileOpening, FailsSilently, HangsWhileOpening
+from tests.fakes import DiesWhileOpening, FailsSilently, FakeWriter, HangsWhileOpening
 from tests.test_mbox import mbox
 from unbound import mapi, mbox_reader, pff_process
+from unbound.pst_writer import DETACH_TIMEOUT, DetachError
 from unbound.converter import MAIL, Failure, Result, convert, scan_folders, write_log
 from unbound.errors import first_line
 from unbound.mbox_reader import is_mbox_source, message_offsets, parse_message
@@ -48,6 +49,31 @@ class ErrorsWithoutAMessage(TempDir):
                          outlook_writer=FailsSilently(fail_on={"two"}))
         self.assertEqual(result.copied[MAIL], 2)
         self.assertEqual(result.failures, [Failure("Inbox", 1, "two", "SilentError")])
+
+
+class NotDetached(TempDir):
+    """A PST Outlook won't detach at the end: what was copied is reported,
+    not "Conversion failed" with no counts, as a real conversion was."""
+
+    def test_counts_are_kept_and_the_log_says_what_to_do(self):
+        export = os.path.join(self.dir, "export")
+        self.write("export/Inbox.mbox/mbox", mbox(b"Subject: one\n\nx\n", b"Subject: two\n\nx\n"))
+        nodes = [n for top in scan_folders(export) for n in top.walk()]
+        writer = FakeWriter()
+        writer.close = mock.Mock(side_effect=DetachError("Outlook stopped responding"))
+        pst, progress = os.path.join(self.dir, "out.pst"), []
+        with mock.patch("unbound.pst_writer.PstWriter", return_value=writer):
+            result = convert(export, pst, nodes, progress=lambda *a: progress.append(a))
+        self.assertEqual(result.copied[MAIL], 2)
+        self.assertEqual(result.still_attached, "Outlook stopped responding")
+        self.assertEqual(progress[-1], (0, 2, "Detaching the PST from Outlook…"))
+        self.assertEqual(writer.close.call_args.kwargs, {"timeout": DETACH_TIMEOUT})
+        log = os.path.join(self.dir, "log.txt")
+        write_log(result, export, pst, log)
+        with open(log, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("Not detached from Outlook: Outlook stopped responding.", text)
+        self.assertIn("Copied: 2", text)
 
 
 class LogLines(TempDir):

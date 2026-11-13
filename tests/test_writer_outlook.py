@@ -1,6 +1,8 @@
 """PstWriter's dealings with Outlook, against stand-ins (tests/fake_outlook.py)
 that behave as Outlook was seen to in the 1.3.3 review."""
 
+import threading
+import time
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
@@ -59,6 +61,73 @@ class FindingTheNewPst(unittest.TestCase):
         self.assertEqual(ns.removed, [r"C:\out\new.pst"])
 
 
+class Hangs(fo.Namespace):
+    """An Outlook that stops answering, as one started in the background was
+    seen to when asked to detach the PST at the end of a real conversion."""
+
+    def __init__(self, existing=()):
+        super().__init__(existing)
+        self.answer = threading.Event()
+
+    def RemoveStore(self, root):
+        self.answer.wait(30)
+        super().RemoveStore(root)
+
+
+class Refuses(fo.Namespace):
+    def RemoveStore(self, root):
+        raise fo.OutlookError("The remote procedure call failed.")
+
+
+class DetachingAtTheEnd(unittest.TestCase):
+    """Detaching the PST has a time limit, so a silent Outlook can't keep the
+    window at 100% for ever."""
+
+    def close(self, ns, timeout=5):
+        with mock.patch.object(pst_writer.win32com.client, "Dispatch", return_value=fo.App(ns)):
+            w = PstWriter(r"C:\out\new.pst")
+            try:
+                w.close(timeout=timeout)
+            finally:
+                self.writer = w
+
+    def test_detaches_the_pst(self):
+        ns = fo.Namespace([fo.Store(r"C:\a.ost", broken=True)])
+        self.close(ns)
+        self.assertEqual(ns.removed, [r"C:\out\new.pst"])
+        self.assertIsNone(self.writer.ns)
+
+    def test_gives_up_on_an_outlook_that_stops_answering(self):
+        ns = Hangs()
+        self.addCleanup(ns.answer.set)  # let the waiting thread finish
+        started = time.time()
+        with self.assertRaises(pst_writer.DetachTimeout) as caught:
+            self.close(ns, timeout=0.3)
+        self.assertLess(time.time() - started, 5)
+        self.assertIn("stopped responding", str(caught.exception))
+        self.assertIsNone(self.writer.ns)
+        # Still queued: Outlook detaches it once it answers again
+        ns.answer.set()
+        for _ in range(50):
+            if ns.removed:
+                break
+            time.sleep(0.1)
+        self.assertEqual(ns.removed, [r"C:\out\new.pst"])
+
+    def test_a_refusal_is_reported(self):
+        with self.assertRaises(pst_writer.DetachError) as caught:
+            self.close(Refuses())
+        self.assertIn("remote procedure call failed", str(caught.exception))
+
+    def test_a_pst_outlook_already_let_go_of_is_fine(self):
+        ns = fo.Namespace()
+        with mock.patch.object(pst_writer.win32com.client, "Dispatch", return_value=fo.App(ns)):
+            w = PstWriter(r"C:\out\new.pst")
+            ns.Stores.list.clear()
+            w.close(timeout=5)
+        self.assertEqual(ns.removed, [])
+
+
 class Folders(unittest.TestCase):
     """F7: Outlook treats names differing only in case (or accent encoding)
     as the same folder, so every item of the second one used to fail."""
@@ -85,8 +154,20 @@ class YearlyRepeats(unittest.TestCase):
                               day_of_week_mask=4, day_of_month=9, instance=2,
                               start_date=datetime(2026, 3, 10), end_type=cal.END_NEVER)
 
-    def set_pattern(self, r):
-        pattern = fo.Pattern()
+    def test_leap_day_birthday(self):
+        """A yearly series on 29 February: Outlook works out the day, month
+        and interval itself and refuses to be told them (a real birthday
+        failed to convert)."""
+        r = cal.Recurrence(frequency=cal.FREQ_YEARLY, pattern_type=cal.PT_MONTH, period=12,
+                           day_of_month=29, start_date=datetime(2024, 2, 29),
+                           end_type=cal.END_NEVER)
+        s = self.set_pattern(r, derived={"DayOfMonth": 29, "MonthOfYear": 2, "Interval": 12})
+        self.assertEqual(s["RecurrenceType"], cal.OL_YEARLY)
+        self.assertNotIn("DayOfMonth", s)
+        self.assertTrue(s["NoEndDate"])
+
+    def set_pattern(self, r, derived=None):
+        pattern = fo.Pattern(derived)
         item = SimpleNamespace(GetRecurrencePattern=lambda: pattern, AllDayEvent=False)
         bare_writer()._set_recurrence(item, r)
         return pattern.set
@@ -178,6 +259,20 @@ class NothingHalfWritten(unittest.TestCase):
         with self.assertRaises(fo.OutlookError):
             w.add_message(folder, message(message_class="IPM.Note", plain_body="hi"))
         self.assertTrue(leftover.deleted)
+
+    def test_removed_for_good_not_left_in_deleted_items(self):
+        """Delete() in a PST only moves an item to Deleted Items, where a
+        failed birthday series was found after a real conversion."""
+        w = bare_writer()
+        bin_ = fo.DeletedItems()
+        saved = fo.Item("E1")
+        saved.deleted_items = bin_
+        w.ns = SimpleNamespace(GetItemFromID=lambda *a: saved)
+        w.store = SimpleNamespace(StoreID="S", GetDefaultFolder=lambda kind: bin_)
+        w._delete_saved("E1")
+        self.assertTrue(saved.deleted)
+        self.assertEqual(len(bin_.list), 1)
+        self.assertTrue(bin_.list[0].deleted)  # found in Deleted Items and deleted from there
 
 
 if __name__ == "__main__":

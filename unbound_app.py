@@ -122,7 +122,7 @@ def convert_without_window(source, pst):
             pass  # e.g. the output folder doesn't exist; the exit code still says it failed
         return 2
     write_log(result, source, pst, log)
-    return 1 if result.failures else 0
+    return 1 if result.failures or result.still_attached else 0
 
 
 if __name__ == "__main__":
