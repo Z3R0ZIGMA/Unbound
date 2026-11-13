@@ -43,5 +43,22 @@ MSGFLAG_UNSENT = 0x0008
 MAPI_TO, MAPI_CC, MAPI_BCC = 1, 2, 3
 
 
+def recipient_kind(value):
+    """To, Cc or Bcc from a stored PR_RECIPIENT_TYPE. The value can carry
+    flags in its high bits (0x10000000 on resent mail, 0x80000000 once
+    submitted), which Outlook refuses as a recipient type."""
+    kind = (value or MAPI_TO) & 0xF
+    return kind if kind in (MAPI_TO, MAPI_CC, MAPI_BCC) else MAPI_TO
+
+
+def system_dll(name):
+    """Full path of a DLL in Windows' own System32 folder. Loading by bare
+    name would first look in the program's folder, where a planted file with
+    that name (e.g. in Downloads, next to Unbound.exe) would be run."""
+    import os
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    return os.path.join(root, "System32", name)
+
+
 def proptag_url(prop_id, prop_type):
     return f"http://schemas.microsoft.com/mapi/proptag/0x{prop_id:04X}{prop_type:04X}"

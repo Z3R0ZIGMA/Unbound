@@ -87,3 +87,32 @@ class TroubledReader:
 class AlwaysCrashes(TroubledReader):
     def read(self, identifier, i):
         os._exit(3)
+
+
+class DiesWhileOpening:
+    """A reader whose process ends while opening the file, as one killed by
+    a virus scanner or by running out of memory would."""
+
+    def __init__(self, path):
+        os._exit(3)
+
+
+class HangsWhileOpening:
+    """A reader that never finishes opening the file."""
+
+    def __init__(self, path):
+        time.sleep(120)
+
+
+class SilentError(Exception):
+    """An exception with no message, like MemoryError()."""
+
+    def __str__(self):
+        return ""
+
+
+class FailsSilently(FakeWriter):
+    def add_message(self, folder, m):
+        if m.subject in self.fail_on:
+            raise SilentError()
+        self.messages.append((folder, m.subject))

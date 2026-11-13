@@ -76,15 +76,35 @@ def self_check(report_path):
         ok = False
         lines.append(f"FAIL time zone names: {e}")
 
-    from unbound.app import _icon_path
-    if os.path.exists(_icon_path()):
-        lines.append("OK   icon")
-    else:
+    try:
+        from unbound.app import _icon_path
+        if os.path.exists(_icon_path()):
+            lines.append("OK   icon")
+        else:
+            ok = False
+            lines.append(f"FAIL icon: not found at {_icon_path()}")
+    except Exception as e:
         ok = False
-        lines.append(f"FAIL icon: not found at {_icon_path()}")
+        lines.append(f"FAIL icon: {e}")
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return 0 if ok else 1
+
+
+def _guarded(fn, *args, fallback_file=None, code=1):
+    """Run a test mode so that any error ends in an exit code, never in the
+    windowed EXE's "Unhandled exception" box, which would wait for a click
+    (and in CI, for hours)."""
+    try:
+        return fn(*args)
+    except BaseException as e:  # noqa: BLE001 - an exit code is the whole point
+        if fallback_file:
+            try:
+                with open(fallback_file, "w", encoding="utf-8") as fh:
+                    fh.write(f"FAIL {type(e).__name__}: {e}\n")
+            except OSError:
+                pass
+        return code
 
 
 def convert_without_window(source, pst):
@@ -96,7 +116,10 @@ def convert_without_window(source, pst):
         nodes = [n for top in scan_folders(source) for n in top.walk() if n.default_checked]
         result = convert(source, pst, nodes, detach=recover_interrupted())
     except Exception as e:
-        write_failure_log(e, source, pst, log)
+        try:
+            write_failure_log(e, source, pst, log)
+        except OSError:
+            pass  # e.g. the output folder doesn't exist; the exit code still says it failed
         return 2
     write_log(result, source, pst, log)
     return 1 if result.failures else 0
@@ -106,8 +129,9 @@ if __name__ == "__main__":
     # Must come first: the reader process is this same program started again
     multiprocessing.freeze_support()
     if len(sys.argv) == 3 and sys.argv[1] == "--check":
-        sys.exit(self_check(sys.argv[2]))
+        sys.exit(_guarded(self_check, sys.argv[2], fallback_file=sys.argv[2], code=1))
     if len(sys.argv) == 4 and sys.argv[1] == "--convert":
-        sys.exit(convert_without_window(os.path.abspath(sys.argv[2]), os.path.abspath(sys.argv[3])))
+        sys.exit(_guarded(convert_without_window, os.path.abspath(sys.argv[2]),
+                          os.path.abspath(sys.argv[3]), code=2))
     from unbound.app import main
     main()

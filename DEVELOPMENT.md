@@ -24,7 +24,7 @@ Fast, and they need neither Outlook nor a mailbox:
 .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-They cover the folder scan, the MBOX reader, the recurrence and property decoders (including with damaged data), the reader process (including a reader that crashes or hangs), crash recovery, the conversion loop with a stand-in for Outlook, and the window's rules (what may be saved where, closing during a conversion). They use only Python's own `unittest`, so testing adds no dependencies.
+They cover the folder scan, the MBOX reader, the recurrence and property decoders (including with damaged data), the reader process (including a reader that crashes or hangs), crash recovery, the conversion loop with a stand-in for Outlook, the PST writer against stand-ins that behave as Outlook was seen to (`tests/fake_outlook.py`: stores it can't reach, folder names it treats as equal, yearly intervals in months, refused rich text), and the window's rules (what may be saved where, closing during a conversion, remembered folders, a PC without Outlook). The window tests keep their settings in a temporary file, never in the registry. They use only Python's own `unittest`, so testing adds no dependencies.
 
 A static check catches undefined names and leftover imports:
 
@@ -61,7 +61,7 @@ Those two need no real mailbox. The OST scripts do: Outlook locks the OST of the
 
 Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them). `copy_items_test.py` used to fail "time zone" for appointments with an IANA zone name such as `America/New_York`; since 1.3.0 those are given the matching Windows zone, which hasn't been run against a real OST yet. Everything else should pass.
 
-`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times and full recurrence; contacts: name and email), and which field differs when one isn't. Times are compared to the second.
+`compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times, full recurrence and notes; contacts: name, email and notes), and which field differs when one isn't. Times are compared to the second, and notes as text, since Outlook stores appointment notes as HTML that Unbound can only write back as text.
 
 ### Testing the EXE itself
 
@@ -129,7 +129,7 @@ SmartScreen warns about a download when neither the file nor its publisher has a
 |---|---|---|---|
 | **Azure Artifact Signing** (was Trusted Signing) | about $10 a month | Individuals in the USA and Canada; organisations there, in the EU, the UK and some other countries | Nothing more: the release workflow's signing step is written for it |
 | **Certificate from a certificate authority** (DigiCert, Sectigo, Certum and others) | roughly $150–300 a year | Anyone, anywhere | A different signing step: the key sits on a hardware token or in the authority's cloud service |
-| **SignPath Foundation** | free | Open-source projects that meet its conditions (public code under an open-source licence). Unbound is MIT-licensed; its repository would also have to be public | Its own signing step; the publisher shown is SignPath Foundation |
+| **SignPath Foundation** | free | Open-source projects that meet its conditions (public code under an open-source licence), approved at its discretion. Unbound qualifies on paper, but this route was set aside: every release needs SignPath's manual approval | Its own signing step; the publisher shown is SignPath Foundation, not you |
 | **Microsoft Store** | free | Anyone, anywhere | Packaging the app as MSIX and submitting it; Microsoft signs it |
 
 Check each provider's current terms before choosing; the first row's limits are from Microsoft's documentation at the time of writing.
@@ -186,7 +186,8 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `unbound/appointment.py` | Decodes recurrence patterns and time zones, which Outlook only accepts through its object model |
 | `unbound/timezones.py` | Windows names for IANA time zones (`America/New_York`), asked of Windows itself |
 | `unbound/mapi.py` | MAPI property tags shared by reader and writer |
-| `tests/` | Unit tests (no Outlook needed) |
+| `unbound/errors.py` | Error text as shown in the window and the log |
+| `tests/` | Unit tests (no Outlook needed); `tests/fakes.py` and `tests/fake_outlook.py` are the stand-ins for the reader and for Outlook |
 | `scripts/list_folders.py` | Command-line check: prints an OST's folder tree and test-reads items |
 | `scripts/copy_one_message.py` | Command-line check: copies one message to a PST and compares every field |
 | `scripts/copy_items_test.py` | Command-line check: copies sample appointments and a contact to a PST and compares every property and the recurrence |

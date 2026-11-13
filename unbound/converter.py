@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import pypff
 
 from . import __version__
+from .errors import first_line
 from .mbox_reader import find_mailboxes, is_mbox_source, message_offsets, parse_message, read_raw
 from .ost_reader import (
     OstInUseError, is_lock_error, is_locked, open_file, programs_using, read_message,
@@ -610,7 +611,7 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
                     result.stopped = str(e)
                     return result
                 except Exception as e:  # one bad item must not stop the run
-                    result.failures.append(Failure(label, i, subject, str(e).splitlines()[0][:300]))
+                    result.failures.append(Failure(label, i, subject, first_line(e)))
                 done += 1
                 if progress:
                     progress(done, total, label)
@@ -630,6 +631,13 @@ def convert(ost_path, pst_path, selected, progress=None, should_cancel=None,
             finally:
                 run.close()
     return result
+
+
+def _one_line(text):
+    """Text from the mailbox (a subject, a folder name) on one line: a line
+    break in it could otherwise write lines that look like the log's own,
+    such as a fake "Failed: 0"."""
+    return " ".join(str(text or "").split())
 
 
 def log_path_for(pst_path):
@@ -686,11 +694,13 @@ def write_log(result, ost_path, pst_path, log_path):
         if result.warnings:
             fh.write("Copied with warnings (folder | item number | subject | warning)\n")
             for w in result.warnings:
-                fh.write(f"{w.folder} | {w.index + 1} | {w.subject} | {w.error}\n")
+                fh.write(f"{_one_line(w.folder)} | {w.index + 1} | {_one_line(w.subject)} | "
+                         f"{_one_line(w.error)}\n")
             fh.write("\n")
         if result.failures:
             fh.write("Failed items (folder | item number | subject | error)\n")
             for fl in result.failures:
-                fh.write(f"{fl.folder} | {fl.index + 1} | {fl.subject} | {fl.error}\n")
+                fh.write(f"{_one_line(fl.folder)} | {fl.index + 1} | {_one_line(fl.subject)} | "
+                         f"{_one_line(fl.error)}\n")
         else:
             fh.write("No items failed.\n")

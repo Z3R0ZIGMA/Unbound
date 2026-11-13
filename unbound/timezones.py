@@ -10,11 +10,14 @@ rather than shipping a table here that would go out of date.
 import ctypes
 from functools import lru_cache
 
+from .mapi import system_dll
+
 
 @lru_cache(maxsize=None)
 def _mapper():
     try:
-        fn = ctypes.WinDLL("icu.dll").ucal_getWindowsTimeZoneID
+        # By full path: a file called icu.dll next to Unbound.exe mustn't be loaded
+        fn = ctypes.WinDLL(system_dll("icu.dll")).ucal_getWindowsTimeZoneID
     except (OSError, AttributeError):
         return None  # older Windows, or not Windows at all
     fn.argtypes = [ctypes.c_wchar_p, ctypes.c_int32, ctypes.c_wchar_p, ctypes.c_int32,

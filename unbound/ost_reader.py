@@ -130,7 +130,7 @@ def programs_using(path):
     ("Microsoft Word"), asked of the Restart Manager. Empty if there are
     none, or if Windows can't say."""
     try:
-        rm = ctypes.WinDLL("rstrtmgr")
+        rm = ctypes.WinDLL(mapi.system_dll("rstrtmgr.dll"))
     except OSError:
         return []
     session = wintypes.DWORD()
@@ -277,7 +277,7 @@ def read_message(msg):
             recipients.append(Recipient(
                 name=_string(r, mapi.DISPLAY_NAME) or "",
                 email=_string(r, mapi.SMTP_ADDRESS) or _string(r, mapi.EMAIL_ADDRESS) or "",
-                kind=_integer(r, mapi.RECIPIENT_TYPE) or mapi.MAPI_TO,
+                kind=mapi.recipient_kind(_integer(r, mapi.RECIPIENT_TYPE)),
             ))
 
     attachments = []

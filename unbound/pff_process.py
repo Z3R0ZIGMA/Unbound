@@ -9,13 +9,17 @@ is reported as failed, the reader is started again and the conversion goes on.
 """
 
 import multiprocessing
+import multiprocessing.connection
 import weakref
 
 from .converter import _PffReader
+from .errors import first_line as _first_line
 from .ost_reader import OstInUseError
 
 MAX_RESTARTS = 20
 ITEM_TIMEOUT = 600  # seconds for one item; a hung reader is treated like a crashed one
+OPEN_TIMEOUT = 600  # seconds for the reader to open the file and say it's ready
+SCAN_TIMEOUT = 3600  # seconds to scan the folder tree (very large files take minutes)
 
 
 class ReaderCrashed(RuntimeError):
@@ -24,10 +28,6 @@ class ReaderCrashed(RuntimeError):
 
 class ReaderLost(RuntimeError):
     """The reader can't be started (again), so nothing more can be read."""
-
-
-def _first_line(e):
-    return (str(e).splitlines() or [type(e).__name__])[0][:300]
 
 
 def _serve(conn, path, reader_factory):
@@ -91,8 +91,14 @@ class PffProcess:
         self.reader_factory = reader_factory
         self.restarts = 0
         self.proc = self.conn = None
-        self._start()
+        # Listed before it starts, so closing the app can end a reader that
+        # hangs while still opening the file
         _live.add(self)
+        try:
+            self._start()
+        except BaseException:
+            _live.discard(self)
+            raise
 
     def _start(self):
         if _shutting_down:
@@ -103,12 +109,20 @@ class PffProcess:
                                 daemon=True, name="unbound-reader")
         self.proc.start()
         child_end.close()
+        # Wait for the reader's first word, or for it to end. A process that
+        # dies before it has taken over its end of the pipe never closes it,
+        # so waiting on the pipe alone could wait for ever.
+        lost = ReaderLost("The file's reader stopped while opening the file. "
+                          "The file is probably damaged.")
         try:
+            ready = multiprocessing.connection.wait([self.conn, self.proc.sentinel],
+                                                    timeout=OPEN_TIMEOUT)
+            if self.conn not in ready:
+                raise EOFError
             status, detail = self.conn.recv()
-        except (EOFError, OSError):
+        except (EOFError, OSError, ValueError, TypeError):
             self._stop(polite=False)
-            raise ReaderLost("The file's reader stopped while opening the file. "
-                             "The file is probably damaged.") from None
+            raise lost from None
         if status == "ready":
             return
         self._stop(polite=False)
@@ -164,10 +178,11 @@ class PffProcess:
 
     def scan(self):
         """The folders to show, as converter.FolderNode trees."""
-        return self._ask("scan")
+        return self._ask("scan", timeout=SCAN_TIMEOUT)
 
     def folder(self, node):
-        return node.identifier if self._ask("has_folder", node.identifier) else None
+        return (node.identifier if self._ask("has_folder", node.identifier, timeout=ITEM_TIMEOUT)
+                else None)
 
     def item(self, folder_id, i):
         """(Message, props loader), or (None, None) for a hidden system item."""

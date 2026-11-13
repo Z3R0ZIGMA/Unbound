@@ -48,9 +48,13 @@ def is_mbox_source(path):
         return True
     try:
         with open(path, "rb") as fh:
-            return bool(_FROM_LINE.match(fh.read(64)))
+            first_line = fh.readline(4096)
     except OSError:
         return False
+    # Judged by content only when the name doesn't say: a text file that
+    # merely starts with "From here on..." isn't a mailbox. A real mailbox
+    # starts with a dated separator line.
+    return bool(_FROM_LINE_DATED.match(first_line))
 
 
 def _mailbox_name(entry):
@@ -95,6 +99,7 @@ def _children(folder, parent_path):
 # ---------- splitting an mbox into messages ----------
 
 _offsets_cache = {}
+_MAX_PIECE = 1 << 20  # bytes read at a time when looking for separator lines
 
 
 def message_offsets(file):
@@ -106,10 +111,16 @@ def message_offsets(file):
     offsets = []
     pos = 0
     previous_blank = True
+    at_line_start = True
     separator = None  # how this file marks a new message; set by its first one
     with open(file, "rb") as fh:
-        for line in fh:
-            if previous_blank and line.startswith(b"From "):
+        while True:
+            # Read in bounded pieces: a huge file with no line breaks (not a
+            # real mailbox, but possible) mustn't be loaded into memory whole
+            line = fh.readline(_MAX_PIECE)
+            if not line:
+                break
+            if at_line_start and previous_blank and line.startswith(b"From "):
                 if separator is None:
                     # Mail programs date every separator line. Asking for the
                     # date stops a body line such as "From here on, ..." being
@@ -119,7 +130,8 @@ def message_offsets(file):
                     separator = _FROM_LINE_DATED if _FROM_LINE_DATED.match(line) else _FROM_LINE
                 if separator.match(line):
                     offsets.append(pos)
-            previous_blank = line in (b"\n", b"\r\n")
+            previous_blank = at_line_start and line in (b"\n", b"\r\n")
+            at_line_start = line.endswith(b"\n")
             pos += len(line)
     _offsets_cache[key] = offsets
     return offsets
@@ -151,8 +163,8 @@ def _utc(dt):
 def _date(value):
     try:
         return _utc(parsedate_to_datetime(str(value))) if value else None
-    except (TypeError, ValueError, IndexError):
-        return None
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None  # e.g. a date in the year 9999: the email keeps no date
 
 
 def _addresses(msg, header):

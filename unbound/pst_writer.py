@@ -7,15 +7,19 @@ PropertyAccessor and re-classed as IPM.Note so it shows as normal mail.
 """
 
 import gc
+import html
 import os
 import re
 import tempfile
+import unicodedata
 from datetime import timedelta, timezone
+from html.parser import HTMLParser
 
 import win32com.client
 
 from . import appointment as cal
 from . import mapi
+from .errors import first_line
 from .props import PT_SYSTIME
 from .timezones import windows_zone
 
@@ -106,6 +110,108 @@ def _safe_filename(name):
     return name
 
 
+class _TextFromHtml(HTMLParser):
+    """Collects the readable text of an HTML document."""
+
+    BREAKS = {"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "table"}
+    HIDDEN = {"head", "style", "script", "title"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.HIDDEN:
+            self.hidden += 1
+        elif tag in self.BREAKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.HIDDEN:
+            self.hidden = max(0, self.hidden - 1)
+        elif tag in self.BREAKS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def html_to_text(text):
+    """The readable text of an HTML body, for an item that can only take a
+    plain one. Line breaks are kept; runs of blank lines are squeezed."""
+    parser = _TextFromHtml()
+    try:
+        parser.feed(text or "")
+        parser.close()
+        raw = "".join(parser.parts)
+    except Exception:
+        raw = html.unescape(re.sub(r"<[^>]*>", " ", text or ""))
+    lines = [" ".join(line.split()) for line in raw.replace("\xa0", " ").splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def clean_rtf(rtf):
+    """RTF as Outlook will accept it. RTF decoded from an OST's compressed
+    form ends with padding (NUL bytes) after the closing brace, and Outlook
+    rejects that as "The parameter is incorrect"."""
+    if isinstance(rtf, str):
+        rtf = rtf.encode("cp1252", errors="replace")
+    return (rtf or b"").rstrip(b"\x00\r\n ")
+
+
+# RTF groups that hold no text: fonts, colours, styles, document info and
+# "\*" destinations such as \*\generator
+_RTF_SKIPPED_GROUPS = re.compile(r"\{\\(?:\*|(?:fonttbl|colortbl|stylesheet|info|pict)\b)")
+
+
+def _drop_rtf_groups(text):
+    out, i = [], 0
+    while True:
+        m = _RTF_SKIPPED_GROUPS.search(text, i)
+        if not m:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:m.start()])
+        depth, j = 0, m.start()
+        while j < len(text):
+            ch = text[j]
+            if ch == "\\":
+                j += 2  # an escaped brace doesn't count
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        i = j + 1
+
+
+def rtf_to_text(rtf):
+    """A rough plain-text version of an RTF body, for when Outlook won't take
+    the RTF itself and there's no other body: enough to keep the words."""
+    if isinstance(rtf, bytes):
+        rtf = rtf.decode("cp1252", errors="replace")
+    text = _drop_rtf_groups((rtf or "").rstrip("\x00"))
+    text = re.sub(r"\\(par|line)\b ?", "\n", text)
+    text = re.sub(r"\\'([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]).decode("cp1252", "replace"), text)
+    text = re.sub(r"\\u(-?\d+)\??", lambda m: chr(int(m.group(1)) % 0x10000), text)
+    text = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", text)  # other control words
+    text = text.replace("\\{", "{").replace("\\}", "}").replace("\\\\", "\\")
+    text = text.replace("{", "").replace("}", "")
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _folder_key(name):
+    """How Outlook compares folder names: ignoring case and how accents are
+    encoded. "Archive" and "archive" are the same folder to it."""
+    return unicodedata.normalize("NFC", name or "").casefold()
+
+
 def _is_smtp(address):
     return bool(address) and "@" in address and not address.startswith("/")
 
@@ -127,6 +233,26 @@ def recipient_text(name, email):
     return (name or email or None), False
 
 
+def _stores_newest_first(ns):
+    """Each store in the profile with its file path, newest first, stepping
+    over any that Outlook can't open right now.
+
+    A store that can't be reached (a shared mailbox, an account that can't
+    sign in, an archive on a drive that isn't connected) can block for
+    minutes and then make Outlook's own `for store in Stores` enumeration
+    fail. Going by index, one bad store costs only itself, and the PST just
+    attached, which is the newest, is found first.
+    """
+    stores = ns.Stores
+    for i in range(stores.Count, 0, -1):
+        try:
+            store = stores.Item(i)
+            path = store.FilePath
+        except Exception:
+            continue
+        yield store, path
+
+
 def _detach(ns, paths):
     """Detach these PST files from the Outlook profile where they're
     attached (the files stay on disk). Returns the paths that were."""
@@ -134,14 +260,16 @@ def _detach(ns, paths):
     removed = []
     if not want:
         return removed
-    for store in list(ns.Stores):
-        try:
-            path = store.FilePath
-            if path and os.path.normcase(os.path.abspath(path)) in want:
-                ns.RemoveStore(store.GetRootFolder())
-                removed.append(path)
-        except Exception:
-            continue  # a store Outlook won't report on, or won't let go of
+    try:
+        for store, path in list(_stores_newest_first(ns)):
+            try:
+                if path and os.path.normcase(os.path.abspath(path)) in want:
+                    ns.RemoveStore(store.GetRootFolder())
+                    removed.append(path)
+            except Exception:
+                continue  # a store Outlook won't let go of
+    except Exception:
+        pass  # Outlook couldn't even say how many stores there are
     return removed
 
 
@@ -164,21 +292,23 @@ class PstWriter:
         self.ns = self.app.GetNamespace("MAPI")
         if detach:
             _detach(self.ns, detach)
-        self.ns.AddStoreEx(self.pst_path, OL_STORE_UNICODE)
-        self.store = self._find_store()
-        self.root = self.store.GetRootFolder()
-        if display_name:
-            self.root.Name = display_name
         self.property_errors = {}  # property name -> error text, for the log
         self.warnings = []  # things copied only partly, for the log
+        self.ns.AddStoreEx(self.pst_path, OL_STORE_UNICODE)
+        try:
+            self.store = self._find_store()
+            self.root = self.store.GetRootFolder()
+            if display_name:
+                self.root.Name = display_name
+        except BaseException:
+            # The PST is attached but can't be used: don't leave it in the
+            # user's profile
+            _detach(self.ns, [self.pst_path])
+            raise
 
     def _find_store(self):
         want = os.path.normcase(self.pst_path)
-        for store in self.ns.Stores:
-            try:
-                path = store.FilePath
-            except Exception:
-                continue
+        for store, path in _stores_newest_first(self.ns):
             if path and os.path.normcase(os.path.abspath(path)) == want:
                 return store
         raise RuntimeError(f"Outlook did not attach the PST: {self.pst_path}")
@@ -195,14 +325,25 @@ class PstWriter:
         folder = self.root
         for name, ftype in zip(parts, folder_types):
             existing = None
+            # Matched the way Outlook matches: it won't create "archive" next
+            # to "Archive" (IMAP accounts can have both), so they share one
+            key = _folder_key(name)
             for sub in folder.Folders:
-                if sub.Name == name:
+                if _folder_key(sub.Name) == key:
                     existing = sub
                     break
             if existing is None:
-                existing = folder.Folders.Add(name, ftype) if ftype else folder.Folders.Add(name)
+                try:
+                    existing = self._add_folder(folder, name, ftype)
+                except Exception:
+                    # A name Outlook still treats as taken: keep the items apart
+                    existing = self._add_folder(folder, f"{name} (2)", ftype)
             folder = existing
         return folder
+
+    @staticmethod
+    def _add_folder(parent, name, ftype):
+        return parent.Folders.Add(name, ftype) if ftype else parent.Folders.Add(name)
 
     def _staging(self):
         """A temporary folder for one item's attachments, inside the run's
@@ -217,13 +358,21 @@ class PstWriter:
                 continue
             try:
                 rec = item.Recipients.Add(text)
-                rec.Type = r.kind
-                if resolve:
-                    # Without this Outlook stores the raw text as the display
-                    # name and leaves the email address empty
-                    rec.Resolve()
             except Exception as e:
-                self.property_errors[label] = str(e)
+                self.property_errors[label] = first_line(e, 200)
+                continue
+            try:
+                rec.Type = r.kind
+            except Exception as e:
+                # Kept as To; the address matters more than the type
+                self.property_errors[f"{label} type"] = first_line(e, 200)
+            if resolve:
+                # Without this Outlook stores the raw text as the display
+                # name and leaves the email address empty
+                try:
+                    rec.Resolve()
+                except Exception as e:
+                    self.property_errors[label] = first_line(e, 200)
 
     def _add_attachments(self, item, attachments, tmp):
         for i, att in enumerate(attachments):
@@ -246,7 +395,7 @@ class PstWriter:
                     added.PropertyAccessor.SetProperty(
                         mapi.proptag_url(ATTACH_CONTENT_ID, mapi.PT_UNICODE), att.content_id)
                 except Exception as e:
-                    self.property_errors["inline image id"] = str(e).splitlines()[0][:200]
+                    self.property_errors["inline image id"] = first_line(e, 200)
 
     def _copy_props(self, item, props, skip=None):
         """Copy raw properties onto the item; returns (set, failed) counts."""
@@ -263,7 +412,7 @@ class PstWriter:
                 ok += 1
             except Exception as e:
                 failed += 1
-                self.property_errors[_prop_label(p)] = str(e).splitlines()[0][:200]
+                self.property_errors[_prop_label(p)] = first_line(e, 200)
         return ok, failed
 
     # ---------- appointments ----------
@@ -329,7 +478,11 @@ class PstWriter:
             rp.DayOfMonth = 31 if r.pattern_type == cal.PT_MONTH_END else r.day_of_month
         if ol_type in (cal.OL_YEARLY, cal.OL_YEAR_NTH):
             rp.MonthOfYear = r.start_date.month
-        if ol_type != cal.OL_YEARLY or r.interval() > 1:
+        if ol_type in (cal.OL_YEARLY, cal.OL_YEAR_NTH):
+            # Outlook counts a yearly interval in months (12 = every year,
+            # 24 = every two) and refuses 1 or 2 as "not valid"
+            rp.Interval = 12 * r.interval()
+        else:
             rp.Interval = r.interval()
         rp.PatternStartDate = com_date(r.start_date)
         if not item.AllDayEvent:
@@ -389,13 +542,7 @@ class PstWriter:
         item = folder.Items.Add(kind)
         item.MessageClass = m.message_class
         item.Subject = m.subject
-        if m.rtf_body:
-            try:
-                item.RTFBody = m.rtf_body
-            except Exception:
-                item.Body = m.plain_body or ""
-        elif m.plain_body:
-            item.Body = m.plain_body
+        self._set_item_body(item, m)
         if kind == OL_APPOINTMENT_ITEM:
             # attendees; saving never sends anything
             self._add_recipients(item, m.recipients, "attendees")
@@ -404,21 +551,49 @@ class PstWriter:
             self._copy_props(item, props, skip)
             tz = self._set_times(item, a) if is_appt else None
             item.Save()
-        if recurrence is not None:
-            # (Outlook resets the series' start "display" zone to this PC's
-            # here whatever we set; the recurrence keeps the original zone,
-            # which is what defines the series' times.)
-            self._set_recurrence(item, recurrence)
-            item.Save()
-            self._apply_exceptions(item, recurrence, tz)
-        # Outlook recomputes some fields on save, so apply the raw properties
-        # once more on a fresh copy of the item and save again
         entry_id = item.EntryID
-        del item
-        item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
-        self._copy_props(item, props, skip)
-        item.Save()
+        try:
+            if recurrence is not None:
+                # (Outlook resets the series' start "display" zone to this PC's
+                # here whatever we set; the recurrence keeps the original zone,
+                # which is what defines the series' times.)
+                self._set_recurrence(item, recurrence)
+                item.Save()
+                self._apply_exceptions(item, recurrence, tz)
+            # Outlook recomputes some fields on save, so apply the raw properties
+            # once more on a fresh copy of the item and save again
+            del item
+            item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
+            self._copy_props(item, props, skip)
+            item.Save()
+        except BaseException:
+            # Reported as failed, so don't leave a half-made copy behind
+            # (e.g. a series that couldn't repeat saved as a single meeting)
+            self._delete_saved(entry_id)
+            raise
         return item
+
+    def _delete_saved(self, entry_id):
+        try:
+            self.ns.GetItemFromID(entry_id, self.store.StoreID).Delete()
+        except Exception:
+            pass  # best effort; the failure itself is what gets reported
+
+    def _set_item_body(self, item, m):
+        """An appointment's or contact's notes. Outlook writes appointment
+        notes as HTML only, which these items can't take directly, so the
+        HTML's text is kept rather than losing the notes."""
+        if m.rtf_body:
+            try:
+                item.RTFBody = clean_rtf(m.rtf_body)
+                return
+            except Exception:
+                self.warnings.append("the notes' formatting couldn't be kept; saved as plain text")
+        text = m.plain_body or (html_to_text(m.html_body) if m.html_body else "")
+        if not text and m.rtf_body:
+            text = rtf_to_text(m.rtf_body)
+        if text:
+            item.Body = text
 
     def _set(self, accessor, label, prop_id, prop_type, value):
         if value is None or value == "":
@@ -426,7 +601,7 @@ class PstWriter:
         try:
             accessor.SetProperty(mapi.proptag_url(prop_id, prop_type), value)
         except Exception as e:
-            error = str(e).splitlines()[0][:200]
+            error = first_line(e, 200)
             self.property_errors[label] = error
             # Sender and dates matter to the reader, so flag the item itself
             self.warnings.append(f"couldn't set the {label} ({error})")
@@ -463,10 +638,14 @@ class PstWriter:
         elif m.rtf_body:
             # Rich-text mail (common between Outlook users) keeps its formatting
             try:
-                post.RTFBody = m.rtf_body
+                post.RTFBody = clean_rtf(m.rtf_body)
             except Exception:
+                # Outlook can refuse it; keep the words rather than save an
+                # empty email, and say so in the log
+                self.warnings.append("the email's rich-text formatting couldn't be kept; "
+                                     "saved as plain text")
                 post.BodyFormat = OL_FORMAT_PLAIN
-                post.Body = m.plain_body or ""
+                post.Body = m.plain_body or rtf_to_text(m.rtf_body)
         elif m.plain_body:
             # Keep plain-text mail plain; otherwise Outlook stores it as HTML
             post.BodyFormat = OL_FORMAT_PLAIN
@@ -481,11 +660,17 @@ class PstWriter:
 
         # 2. Reopen it: now it's a MailItem, so it takes real recipients.
         #    Times are set here because the first save overwrites them.
-        item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
-        self._add_recipients(item, m.recipients, "recipients")
-        self._set_sender_and_times(item, m)
-        item.UnRead = not m.is_read
-        item.Save()
+        try:
+            item = self.ns.GetItemFromID(entry_id, self.store.StoreID)
+            self._add_recipients(item, m.recipients, "recipients")
+            self._set_sender_and_times(item, m)
+            item.UnRead = not m.is_read
+            item.Save()
+        except BaseException:
+            # Reported as failed, so don't leave a copy without sender,
+            # recipients or dates behind
+            self._delete_saved(entry_id)
+            raise
         return item
 
     def close(self, quit_outlook=False):

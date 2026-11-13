@@ -42,17 +42,27 @@ class Helpers(unittest.TestCase):
             self.assertTrue(ui._same_file(missing, missing.upper()))
 
 
-class Window(unittest.TestCase):
+class WindowCase(unittest.TestCase):
+    """Set-up shared by the window tests: a fresh window per test."""
+
     @classmethod
     def setUpClass(cls):
         cls.qapp = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.win = ui.MainWindow()
-        self.addCleanup(self.dispose)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = tmp.name
+        # The same on every PC (CI has no Outlook), and nothing written to the
+        # registry: remembered folders go to a throwaway file
+        settings_file = os.path.join(self.dir, "settings.ini")
+        for target, value in (("outlook_installed", lambda: True),
+                              ("_settings", lambda: ui.QSettings(settings_file, ui.QSettings.IniFormat))):
+            patcher = mock.patch.object(ui, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.win = ui.MainWindow()
+        self.addCleanup(self.dispose)
 
     def dispose(self):
         # Destroy the window now. Left to the end of the run, Qt objects are
@@ -78,6 +88,16 @@ class Window(unittest.TestCase):
         return next(self.win.tree.topLevelItem(i) for i in range(self.win.tree.topLevelItemCount())
                     if self.win.tree.topLevelItem(i).text(0) == name)
 
+    def start(self, pst):
+        """Press Convert with `pst` chosen in the save dialog; returns the
+        worker that was started, or None."""
+        with mock.patch.object(ui.QFileDialog, "getSaveFileName", return_value=(pst, "")), \
+                mock.patch.object(self.win, "run_in_thread") as run:
+            self.win.start_convert()
+        return run.call_args[0][0] if run.called else None
+
+
+class Window(WindowCase):
     def test_starts_with_nothing_to_convert(self):
         self.assertFalse(self.win.convert_btn.isEnabled())
         self.assertIn(ui.__version__, self.win.findChild(ui.QLabel, "muted").text())
@@ -96,14 +116,6 @@ class Window(unittest.TestCase):
         self.assertFalse(self.win.convert_btn.isEnabled())
         self.win.set_all(True)
         self.assertEqual(self.names(), ["Inbox", "Projects", "Calendar"])
-
-    def start(self, pst):
-        """Press Convert with `pst` chosen in the save dialog; returns the
-        worker that was started, or None."""
-        with mock.patch.object(ui.QFileDialog, "getSaveFileName", return_value=(pst, "")), \
-                mock.patch.object(self.win, "run_in_thread") as run:
-            self.win.start_convert()
-        return run.call_args[0][0] if run.called else None
 
     def test_convert_starts_for_a_new_file(self):
         self.load()
@@ -243,6 +255,122 @@ class Window(unittest.TestCase):
         offered, worker = self.scan_fails(False, "OK")
         self.assertNotIn("Close Outlook and try again", offered)
         self.assertIsNone(worker)
+
+
+class Improvements(WindowCase):
+    """The quick improvements from the 1.3.3 review (QW1-QW12)."""
+
+    def test_pst_can_be_chosen_without_the_all_files_trick(self):  # QW1
+        self.assertEqual([a.text() for a in self.win.browse_btn.menu().actions()][0],
+                         "Outlook data file (OST or PST)…")
+        with mock.patch.object(ui.QFileDialog, "getOpenFileName", return_value=("", "")) as dialog:
+            self.win.choose_file()
+        self.assertIn("*.pst", dialog.call_args[0][3])
+
+    def finished(self, **result_fields):
+        from unbound.converter import Result
+        result = Result(**result_fields)
+        self.win.pst_path = os.path.join(self.dir, "out.pst")
+        shown = {}
+
+        def capture(box):
+            shown["text"], shown["icon"] = box.informativeText(), box.icon()
+            return 0
+        with mock.patch.object(QMessageBox, "exec", capture):
+            self.win.on_converted(result, "")
+        return shown
+
+    def test_attached_emails_left_out_are_mentioned(self):  # QW2
+        shown = self.finished(skipped_attached_emails=3)
+        self.assertIn("Emails attached to other emails, not copied yet: 3", shown["text"])
+        self.assertEqual(shown["icon"], QMessageBox.Warning)
+        self.assertEqual(self.finished()["icon"], QMessageBox.Information)
+
+    def test_plain_english_when_a_file_cannot_be_opened(self):  # QW3
+        empty = os.path.join(self.dir, "empty.ost")
+        open(empty, "wb").close()
+        self.assertIn("empty", ui.explain_open_error(empty, OSError("unable to read")))
+        junk = os.path.join(self.dir, "junk.pst")
+        with open(junk, "wb") as fh:
+            fh.write(b"junk" * 500)
+        self.assertIn("damaged or incomplete", ui.explain_open_error(
+            junk, OSError("libpff_file_header_read: unable to read file header data")))
+        self.assertIn("isn't an Outlook data file", ui.explain_open_error(
+            junk, OSError("libpff: invalid file signature")))
+        worker = ui.ScanWorker(junk)
+        failed = []
+        worker.failed.connect(failed.append)
+        with mock.patch.object(ui, "scan_folders", side_effect=OSError("pypff: unable to read x")):
+            worker.run()
+        self.assertNotIn("pypff", failed[0])
+        self.assertIn("pypff", worker.details)
+
+    def test_progress_while_outlook_starts_and_during_the_working_copy(self):  # QW5
+        self.load()
+        with mock.patch.object(ui.QFileDialog, "getSaveFileName",
+                               return_value=(os.path.join(self.dir, "o.pst"), "")), \
+                mock.patch.object(self.win, "run_in_thread"):
+            self.win.start_convert()
+        self.assertEqual(self.win.progress.maximum(), 0)  # Qt's moving "busy" bar
+        self.win.on_progress(0, 20, "Making a working copy of the OST… 40%")
+        self.assertEqual((self.win.progress.maximum(), self.win.progress.value()), (100, 40))
+        self.win.on_progress(0, 20, "Starting Outlook…")
+        self.assertEqual(self.win.progress.maximum(), 0)
+        with mock.patch.object(QMessageBox, "critical"):
+            self.win.on_convert_failed("no")
+        self.assertGreater(self.win.progress.maximum(), 0)  # no longer animating
+
+    def test_time_left_ignores_set_up_time(self):  # QW8
+        self.win.items_started, self.win.total_items = None, 100
+        clock = iter([1000.0, 1010.0])
+        with mock.patch.object(ui.time, "time", lambda: next(clock)):
+            self.win.on_progress(1, 100, "Inbox")
+            self.win.on_progress(11, 100, "Inbox")  # 10 items in 10 s
+        self.assertIn("about 1m 29s left", self.win.status.text())  # 89 left at 1 a second
+
+    def test_save_starts_in_the_documents_folder_windows_reports(self):  # QW6
+        self.load()
+        with mock.patch.object(ui.QStandardPaths, "writableLocation", return_value=self.dir), \
+                mock.patch.object(ui.QFileDialog, "getSaveFileName", return_value=("", "")) as dialog:
+            self.win.start_convert()
+        self.assertEqual(os.path.dirname(dialog.call_args[0][2]), self.dir)
+
+    def test_button_names_what_it_does(self):  # QW7
+        self.assertEqual(self.win.all_btn.text().replace("&", ""), "Reset selection")
+
+    def test_keyboard_shortcuts(self):  # QW9
+        self.assertEqual(self.win.browse_btn.shortcut().toString(), "Alt+B")
+        self.assertEqual(self.win.convert_btn.shortcut().toString(), "Alt+C")
+        self.assertEqual(self.win.tree.accessibleName(), "Folders to convert")
+
+    def test_last_folders_are_remembered(self):  # QW10
+        source = os.path.join(self.dir, "mail.ost")
+        open(source, "wb").close()
+        with mock.patch.object(ui.QFileDialog, "getOpenFileName", return_value=(source, "")), \
+                mock.patch.object(self.win, "load_file"):
+            self.win.choose_file()
+        with mock.patch.object(ui.QFileDialog, "getOpenFileName", return_value=("", "")) as dialog:
+            self.win.choose_file()
+        self.assertEqual(os.path.normcase(dialog.call_args[0][2]), os.path.normcase(self.dir))
+
+    def test_missing_outlook_is_said_up_front(self):  # QW11
+        with mock.patch.object(ui, "outlook_installed", lambda: False):
+            win = ui.MainWindow()
+        try:
+            self.assertIn("Outlook Classic isn't installed", win.status.text())
+            win.ost_path = os.path.join(self.dir, "mail.ost")
+            open(win.ost_path, "wb").close()
+            win.on_scanned(sample_tree())
+            with mock.patch.object(QMessageBox, "warning") as warning, \
+                    mock.patch.object(win, "run_in_thread") as run:
+                win.start_convert()
+            self.assertFalse(run.called)
+            self.assertIn("Outlook Classic", warning.call_args[0][2])
+        finally:
+            win.thread = win.worker = None
+            win.close()
+            win.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 class ClosingOutlook(unittest.TestCase):

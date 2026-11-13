@@ -7,8 +7,10 @@ import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QFile, QObject, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtCore import (
+    QFile, QObject, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, Signal,
+)
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QTreeWidget,
@@ -21,11 +23,71 @@ from .converter import (
     is_outlook_data_file, log_path_for, recover_interrupted, scan_folders,
     write_failure_log, write_log,
 )
+from .errors import first_line
 from .mbox_reader import is_mbox_source
 from .ost_reader import OstInUseError, _names, is_locked, programs_using
 from .pff_process import kill_readers
 
 APP_NAME = "Unbound"
+
+NO_OUTLOOK = ("Outlook Classic isn't installed on this PC. You can look inside a file here, "
+              "but converting needs Outlook Classic (the New Outlook can't write PST files).")
+
+
+def outlook_installed():
+    """Whether Outlook Classic is registered for automation on this PC."""
+    import winreg
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"Outlook.Application\CLSID"))
+        return True
+    except OSError:
+        return False
+
+
+def _settings():
+    """Where the last folders used are remembered (HKCU\\Software\\Unbound)."""
+    return QSettings("Unbound", "Unbound")
+
+
+def _remembered_dir(key, fallback=""):
+    try:
+        folder = _settings().value(key, "") or ""
+    except Exception:
+        folder = ""
+    return folder if folder and os.path.isdir(folder) else fallback
+
+
+def _remember_dir(key, path):
+    """Remember the folder a file (or an export folder) was in, so the next
+    file window opens there."""
+    try:
+        _settings().setValue(key, os.path.dirname(os.path.normpath(os.path.abspath(path))))
+    except Exception:
+        pass  # only a convenience
+
+
+def _documents_folder():
+    """The Documents folder Windows reports, which can be redirected (e.g. by
+    OneDrive) away from the profile's own Documents folder."""
+    return (QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+            or os.path.join(os.path.expanduser("~"), "Documents"))
+
+
+def explain_open_error(path, error):
+    """One sentence the user can act on, for a file that couldn't be opened."""
+    text = str(error).lower()
+    try:
+        empty = os.path.isfile(path) and os.path.getsize(path) == 0
+    except OSError:
+        empty = False
+    if empty:
+        return "This file is empty (0 bytes), so there is nothing in it to convert."
+    if "invalid file signature" in text or "unsupported" in text:
+        return "This isn't an Outlook data file (OST or PST) or an Apple Mail export."
+    if "unable to read" in text or "mismatch" in text or "truncated" in text:
+        return ("This file is damaged or incomplete, for example a copy or download that was "
+                "cut short. Copy it again from the original PC and try again.")
+    return "This couldn't be opened as an Outlook data file or an Apple Mail export."
 
 # Colours in one place so they're easy to change later
 COLORS = {
@@ -110,6 +172,7 @@ class ScanWorker(QObject):
         self.path = path
         self.in_use_by = []  # programs that have the file open, though it could be read
         self.outlook_has_it = False  # it couldn't be read, because Outlook has it open
+        self.details = ""  # the technical reason, for "Show Details…"
 
     def run(self):
         try:
@@ -129,8 +192,8 @@ class ScanWorker(QObject):
             self.outlook_has_it = e.outlook
             self.failed.emit(str(e))
         except Exception as e:
-            self.failed.emit("This couldn't be opened as an Outlook data file or an MBOX export.\n\n"
-                             + str(e).splitlines()[0][:400])
+            self.details = str(e) or type(e).__name__
+            self.failed.emit(explain_open_error(self.path, e))
 
 
 class ConvertWorker(QObject):
@@ -168,7 +231,7 @@ class ConvertWorker(QObject):
                 self._fail(str(e))
                 return
             except Exception as e:
-                msg = str(e).splitlines()[0][:400]
+                msg = first_line(e, 400)
                 if "Outlook.Application" in msg or "Invalid class string" in msg:
                     msg = ("Couldn't start Outlook. Unbound needs Outlook Classic "
                            "installed on this PC (the New Outlook can't write PST files).")
@@ -201,7 +264,7 @@ class RecoverWorker(QObject):
             from .pst_writer import detach_stores
             self.done.emit(detach_stores(self.psts))
         except Exception as e:
-            self.failed.emit(str(e).splitlines()[0][:300])
+            self.failed.emit(first_line(e))
         finally:
             pythoncom.CoUninitialize()
 
@@ -283,7 +346,8 @@ class MainWindow(QMainWindow):
         version = QLabel(f"Version {__version__}")
         version.setObjectName("muted")
         title_row.addWidget(version, 0, Qt.AlignBottom)
-        subtitle = QLabel("Convert an Outlook OST or an Apple Mail export (MBOX) into a PST")
+        subtitle = QLabel("Convert an Outlook OST or PST, or an Apple Mail export (MBOX), "
+                          "into a new PST")
         subtitle.setObjectName("muted")
         lay.addLayout(title_row)
         lay.addWidget(subtitle)
@@ -292,18 +356,23 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("Choose an OST file or an Apple Mail export, or drop one here…")
-        self.browse_btn = QPushButton("Browse…")
+        self.path_edit.setAccessibleName("Source file or folder")
+        self.path_edit.setPlaceholderText(
+            "Choose an OST or PST file or an Apple Mail export, or drop one here…")
+        self.browse_btn = QPushButton("&Browse…")
         menu = QMenu(self.browse_btn)
-        menu.addAction("Outlook OST file…", self.choose_file)
+        menu.addAction("Outlook data file (OST or PST)…", self.choose_file)
         menu.addAction("Apple Mail export (folder)…", self.choose_mbox_folder)
         self.browse_btn.setMenu(menu)
         row.addWidget(self.path_edit, 1)
         row.addWidget(self.browse_btn)
         lay.addLayout(row)
+        # Ctrl+O opens the file window, as in most programs
+        QShortcut(QKeySequence.Open, self, lambda: None if self.busy() else self.choose_file())
 
         # Middle: folder tree
         self.tree = QTreeWidget()
+        self.tree.setAccessibleName("Folders to convert")
         self.tree.setHeaderLabels(["Folder", "Items"])
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -313,8 +382,10 @@ class MainWindow(QMainWindow):
         sel_row = QHBoxLayout()
         self.summary = QLabel("No file loaded")
         self.summary.setObjectName("muted")
-        self.all_btn = QPushButton("Select all mail")
-        self.none_btn = QPushButton("Clear")
+        self.all_btn = QPushButton("&Reset selection")
+        self.all_btn.setToolTip("Tick your mail, calendar and contacts folders again")
+        self.none_btn = QPushButton("C&lear")
+        self.none_btn.setToolTip("Untick every folder")
         self.all_btn.clicked.connect(lambda: self.set_all(True))
         self.none_btn.clicked.connect(lambda: self.set_all(False))
         sel_row.addWidget(self.summary, 1)
@@ -323,7 +394,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(sel_row)
 
         # Bottom: convert + progress
-        self.convert_btn = QPushButton("Convert to PST")
+        self.convert_btn = QPushButton("&Convert to PST")
         self.convert_btn.setObjectName("convert")
         self.convert_btn.clicked.connect(self.start_convert)
         lay.addWidget(self.convert_btn)
@@ -345,6 +416,10 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.status)
 
         self.update_controls()
+        self.has_outlook = outlook_installed()
+        if not self.has_outlook:
+            # Said now, not after the user has picked folders and a save location
+            self.status.setText(NO_OUTLOOK)
         if self._interrupted:
             self.status.setText("Cleaning up after a conversion that was interrupted…")
             self.run_in_thread(RecoverWorker(self._interrupted),
@@ -371,18 +446,22 @@ class MainWindow(QMainWindow):
         # mailbox, so this picks a folder: the one they were exported into
         # (or a single .mbox folder). Loose .mbox files in it work too.
         path = QFileDialog.getExistingDirectory(
-            self, "Choose the folder you exported from Apple Mail")
+            self, "Choose the folder you exported from Apple Mail",
+            _remembered_dir("last_source_dir"))
         if path:
+            _remember_dir("last_source_dir", path)
             self.load_file(path)
 
     def choose_file(self):
-        start = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
-        # A PST can still be opened through "All files" (e.g. to re-save an
-        # old ANSI PST as Unicode), but OST is what this is for
+        outlook = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Outlook")
+        start = _remembered_dir("last_source_dir", outlook if os.path.isdir(outlook) else "")
+        # A PST works too: e.g. to re-save an old ANSI PST as Unicode, or to
+        # copy only some of its folders into a new one
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose an OST file", start if os.path.isdir(start) else "",
-            "Outlook OST files (*.ost);;All files (*)")
+            self, "Choose an OST or PST file", start,
+            "Outlook data files (*.ost *.pst);;All files (*)")
         if path:
+            _remember_dir("last_source_dir", path)
             self.load_file(path)
 
     def _dropped_path(self, event):
@@ -421,6 +500,9 @@ class MainWindow(QMainWindow):
         self.summary.setText("Couldn't read this file")
         path, self.ost_path = self.ost_path, None
         box = QMessageBox(QMessageBox.Warning, APP_NAME, msg, parent=self)
+        details = getattr(self.worker, "details", "")
+        if isinstance(details, str) and details:
+            box.setDetailedText(details)  # behind "Show Details…"
         close_btn = None
         if getattr(self.worker, "outlook_has_it", False):
             close_btn = box.addButton("Close Outlook and try again", QMessageBox.ActionRole)
@@ -602,16 +684,20 @@ class MainWindow(QMainWindow):
         nodes = self.selected_nodes()
         if not nodes:
             return
+        if not self.has_outlook:
+            QMessageBox.warning(self, APP_NAME, NO_OUTLOOK)
+            return
         base = os.path.basename(os.path.normpath(self.ost_path))
         if base == "mbox":  # the data file inside an Apple .mbox folder
             base = os.path.basename(os.path.dirname(self.ost_path))
-        default = os.path.join(os.path.expanduser("~"), "Documents",
-                               os.path.splitext(base)[0] + ".pst")
+        folder = _remembered_dir("last_output_dir", _documents_folder())
+        default = os.path.join(folder, os.path.splitext(base)[0] + ".pst")
         pst, _ = QFileDialog.getSaveFileName(self, "Save PST as", default,
                                              "Outlook data file (*.pst)")
         if not pst:
             return
         pst = os.path.abspath(pst)
+        _remember_dir("last_output_dir", pst)
         if _same_file(pst, self.ost_path):
             QMessageBox.warning(self, APP_NAME, "Choose a different file from the source.")
             return
@@ -632,9 +718,12 @@ class MainWindow(QMainWindow):
 
         self.pst_path = pst
         self.started = time.time()
-        self.progress.setValue(0)
-        self.progress.setMaximum(max(1, sum(n.item_count for n in nodes)))
-        self.status.setText("Starting Outlook…")
+        self.items_started = None  # set at the first item, for the time-left estimate
+        self.total_items = max(1, sum(n.item_count for n in nodes))
+        # Qt's moving "busy" bar while Outlook starts: that alone can take
+        # minutes, and a bar stuck at 0% looks like a hang
+        self.progress.setRange(0, 0)
+        self.status.setText("Starting Outlook… (this can take a minute or more)")
         self.cancel_btn.show()
         self.cancel_btn.setEnabled(True)
         self.run_in_thread(ConvertWorker(self.ost_path, pst, nodes),
@@ -647,15 +736,33 @@ class MainWindow(QMainWindow):
             return
         if done == 0:  # a setup step, e.g. making a working copy of the OST
             self.status.setText(folder)
+            percent = _trailing_percent(folder)
+            if percent is None:
+                self.progress.setRange(0, 0)  # busy, no measure of how far
+            else:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(percent)
             return
-        self.progress.setMaximum(max(1, total))
+        self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
-        elapsed = time.time() - self.started
+        now = time.time()
+        if getattr(self, "items_started", None) is None:
+            # Time left is measured from the first item: the working copy and
+            # Outlook's start aren't item time
+            self.items_started, self.items_done_at_start = now, done
+        elapsed = now - self.items_started
+        timed = done - getattr(self, "items_done_at_start", 0)
         eta = ""
-        if done >= 5 and elapsed > 3:
-            left = elapsed / done * (total - done)
+        if timed >= 5 and elapsed > 3:
+            left = elapsed / timed * (total - done)
             eta = f" · about {_duration(left)} left"
         self.status.setText(f"{done:,} of {total:,} · {folder}{eta}")
+
+    def _reset_progress_range(self):
+        """Out of the "busy" pattern, e.g. when a run ends during set-up."""
+        if self.progress.maximum() == 0:
+            self.progress.setRange(0, max(1, getattr(self, "total_items", 1)))
+            self.progress.setValue(0)
 
     def cancel_convert(self):
         if self.worker and hasattr(self.worker, "cancel"):
@@ -667,6 +774,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self.cancel_btn.hide()
+        self._reset_progress_range()
         word = "Cancelled" if result.cancelled else "Stopped early" if result.stopped else "Done"
         log_note = f"Log: {log_path}" if log_path else "The log couldn't be saved."
         self.status.setText(f"{word} in {_duration(result.seconds)}. {log_note}")
@@ -680,12 +788,15 @@ class MainWindow(QMainWindow):
                          f"not converted yet): {result.skipped:,}")
         if result.warnings:
             lines.append(f"Copied with warnings: {len(result.warnings):,} (see the log)")
+        if result.skipped_attached_emails:
+            lines.append(f"Emails attached to other emails, not copied yet: "
+                         f"{result.skipped_attached_emails:,}")
         lines.append(f"Failed: {len(result.failures):,}")
         lines += ["", f"PST: {self.pst_path}", log_note]
         box = QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QMessageBox.Warning if result.failures or result.cancelled or result.stopped
-                    else QMessageBox.Information)
+                    or result.skipped_attached_emails else QMessageBox.Information)
         if result.stopped:
             detail = result.stopped + " What was copied before that is in the PST."
         elif result.failures:
@@ -707,6 +818,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self.cancel_btn.hide()
+        self._reset_progress_range()
         self.status.setText("Conversion failed")
         QMessageBox.critical(self, APP_NAME, msg)
 
@@ -774,6 +886,14 @@ def _duration(seconds):
         return f"{m}m {s:02d}s"
     h, m = divmod(m, 60)
     return f"{h}h {m:02d}m"
+
+
+def _trailing_percent(text):
+    """37 from "Making a working copy of the OST… 37%", else None."""
+    word = (text or "").rstrip().rsplit(" ", 1)[-1]
+    if word.endswith("%") and word[:-1].isdigit():
+        return min(100, int(word[:-1]))
+    return None
 
 
 def _size(n_bytes):

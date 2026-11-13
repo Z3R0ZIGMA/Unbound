@@ -12,7 +12,13 @@ Download **`Unbound.exe`** from the [latest release](https://github.com/Z3R0ZIGM
 Get-FileHash Unbound.exe
 ```
 
-The result should match the line in `SHA256SUMS.txt` on the release page (releases from 1.3.1 on have one).
+The result should match the line in `SHA256SUMS.txt` on the release page (releases from 1.3.1 on have one). That shows the download arrived intact. To confirm it was also built by this project's release workflow from the published code (releases from 1.3.3 on), use the [GitHub CLI](https://cli.github.com/):
+
+```powershell
+gh attestation verify Unbound.exe --repo Z3R0ZIGMA/Unbound
+```
+
+Keep `Unbound.exe` in a folder of its own rather than running it from Downloads. Windows looks for some of the files a program loads in that program's own folder first, so a file left in Downloads by something else could be loaded in their place.
 
 To build it yourself instead, see [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe).
 
@@ -26,9 +32,9 @@ Tested with OSTs from **Exchange / Microsoft 365** and **IMAP** accounts.
 ## Using it
 
 1. Start `Unbound.exe`.
-2. Click **Browse…** and choose **Outlook OST file** to pick an OST, or **Apple Mail export (folder)** for mail exported from a Mac (see below). You can also drag the file or folder onto the window. The folder tree appears with item counts.
-3. Tick the folders to convert. Your mail, calendar and contacts folders start ticked; hidden system folders and **Shared mailboxes** start unticked. Ticking a folder ticks its subfolders too. **Select all mail** puts the ticks back to that starting selection, and **Clear** unticks everything.
-4. Click **Convert to PST** and choose where to save the PST, such as in Documents. Unbound won't save into Outlook's own data folder, where a file could belong to your Outlook profile. If you choose a PST that already exists, the old one goes to the Recycle Bin. You're warned first if the PST probably won't fit on the drive, or would pass the 50 GB at which Outlook stops adding to a PST.
+2. Click **Browse…** (or press Ctrl+O) and choose **Outlook data file (OST or PST)** to pick an OST or PST, or **Apple Mail export (folder)** for mail exported from a Mac (see below). You can also drag the file or folder onto the window. The folder tree appears with item counts.
+3. Tick the folders to convert. Your mail, calendar and contacts folders start ticked; hidden system folders and **Shared mailboxes** start unticked. Ticking a folder ticks its subfolders too. **Reset selection** puts the ticks back to that starting selection, and **Clear** unticks everything.
+4. Click **Convert to PST** and choose where to save the PST. The save window starts in Documents, and next time in the folder you last saved to. Unbound won't save into Outlook's own data folder, where a file could belong to your Outlook profile. If you choose a PST that already exists, the old one goes to the Recycle Bin. You're warned first if the PST probably won't fit on the drive, or would pass the 50 GB at which Outlook stops adding to a PST.
 5. Wait for the progress bar. You can cancel at any time; what's already copied stays in the PST. Closing the window does the same: the conversion stops, and the window closes once Outlook has let go of the PST.
 
 When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. It lists what was copied, skipped and failed, plus the folder and item types found in the file. The finished message has buttons to show the PST in its folder and to open the log.
@@ -42,13 +48,13 @@ When it finishes, a log is saved next to the PST as `<name> - Unbound log.txt`. 
 - **Upgrade an old-format PST.** PSTs from Outlook 97–2002 (and ones made by Unbound 1.0.0) use the old ANSI format, which can't hold characters outside the Western alphabet (such as emoji or non-Latin text) and is limited to 2 GB. Converting one gives a modern Unicode PST.
 - **Copy only some folders** of a PST into a new, smaller PST.
 
-Click **Browse… → Outlook OST file**, change the file type at the bottom right of the file window from "Outlook OST files" to **All files**, and pick the PST. Everything else works as for an OST. (Characters already lost in an old-format PST can't be recovered.)
+Click **Browse… → Outlook data file (OST or PST)** and pick the PST. Everything else works as for an OST. (Characters already lost in an old-format PST can't be recovered.)
 
 **Converting this PC's own OST.** An OST in Outlook's data folder (`%LOCALAPPDATA%\Microsoft\Outlook`) may belong to the Outlook profile on this PC, and Outlook locks it while running. Unbound first makes a temporary working copy of such a file and converts from that, so it needs free disk space equal to the OST's size; the copy shows its progress, can be cancelled, and is deleted afterwards. OSTs copied from another PC aren't affected.
 
-Other programs can have your mailbox file open too: Word, Excel and Teams open it while they run, and so does Windows Search. That's fine. Unbound says which ones have it open and converts from a copy all the same. Outlook is the exception, because it changes the file as it syncs: if you see **"Outlook is using this file"**, close Outlook and try again. If no Outlook window is showing, Outlook is running in the background (Unbound starts it to write a PST, and it keeps running afterwards); click **Close Outlook and try again** in that message.
+Other programs can have your mailbox file open too: Word, Excel and Teams open it while they run, and so does Windows Search. That's fine. Unbound says which ones have it open and converts from a copy all the same. Outlook is the exception, because it changes the file as it syncs: if you see **"Outlook is using this file"**, close Outlook and try again. If no Outlook window is showing, Outlook is running in the background (Unbound starts it to write a PST, and it may keep running for a while afterwards); click **Close Outlook and try again** in that message.
 
-Outlook opens in the background during conversion (if it isn't already open) and stays open afterwards. The new PST is not left attached to your Outlook profile; to look at it, use **File → Open & Export → Open Outlook Data File** in Outlook.
+Outlook opens in the background during conversion (if it isn't already open) and may keep running for a while afterwards. The new PST is not left attached to your Outlook profile; to look at it, use **File → Open & Export → Open Outlook Data File** in Outlook.
 
 ## What's converted
 
@@ -59,9 +65,11 @@ Outlook opens in the background during conversion (if it isn't already open) and
 ## Limitations
 
 - **Not converted yet:** tasks, notes, journal entries and contact groups (shown greyed out or counted as skipped in the log). Meeting requests and delivery reports inside mail folders are skipped too.
-- **Emails attached to other emails** (forwarded as an attachment) in an OST or PST aren't copied yet; the log counts them.
+- **Emails attached to other emails** (forwarded as an attachment) in an OST or PST aren't copied yet; the message at the end of a conversion and the log count them.
 - **Damaged files.** If part of an OST or PST can't be read, the items affected are listed as failed in the log and the rest is converted.
 - **No internet headers.** Outlook doesn't let other programs write them, so the raw `Received:`/routing headers aren't copied.
+- **Rich-text formatting.** Outlook may refuse rich text (RTF) written by another program; it did on the PC used for testing. The email, or an appointment's or contact's notes, is then saved as plain text and the log says so. Appointment notes stored as HTML are always saved as plain text, because Outlook can't take HTML notes from another program.
+- **Signed and encrypted (S/MIME) emails** may fail to convert; they're listed as failed in the log. This hasn't been tried with real signed mail yet.
 - **Changed occurrences** of a repeating appointment keep their new time, subject and location, but not a changed body or attendee list.
 - **Apple Mail exports** don't record which messages were read or flagged, so every message arrives as read and unflagged. Mailbox names are kept as they are (for example "Sent Messages" stays "Sent Messages").
 - **Speed.** About 0.15 seconds per email and 0.5 seconds per calendar item or contact through Outlook, so a 28,000-message mailbox takes roughly 70 minutes.
@@ -69,7 +77,7 @@ Outlook opens in the background during conversion (if it isn't already open) and
 
 ## Privacy
 
-Unbound works entirely on your PC and makes no internet connections of its own. It never sends mail: every item is only saved into the PST. Temporary files (a working copy of an OST, attachments on their way into Outlook) are deleted when a conversion ends.
+Unbound works entirely on your PC and makes no internet connections of its own. It never sends mail: every item is only saved into the PST. Temporary files (a working copy of an OST, attachments on their way into Outlook) are deleted when a conversion ends. The only thing it keeps is the last folder you opened a file from and the last folder you saved to, in the registry under `HKEY_CURRENT_USER\Software\Unbound`.
 
 ## Development
 

@@ -8,8 +8,10 @@ has one with the same details:
   emails:        subject, sender, sent and received time, read state, body
                  type, attachments (name, size, inline id), recipients
   appointments:  subject, start, end, all-day, full recurrence (pattern,
-                 cancelled and changed occurrences)
-  contacts:      name and email address
+                 cancelled and changed occurrences), notes
+  contacts:      name, email address, notes
+Notes are compared as text (formatting ignored): Outlook stores appointment
+notes as HTML, which Unbound can only write back as text.
 Also reports how many source items of each kind are missing from OUTPUT
 (only meaningful if every folder was converted). Prints counts only, never
 message content. Exit code 0 if everything in OUTPUT matches its source.
@@ -26,6 +28,7 @@ import pypff  # noqa: E402
 
 from unbound import appointment as A  # noqa: E402
 from unbound.ost_reader import open_file, read_message  # noqa: E402
+from unbound.pst_writer import html_to_text, rtf_to_text  # noqa: E402
 from unbound.props import PSETID_ADDRESS, load_name_map, read_props  # noqa: E402
 
 NEVER = (0x2023, 0xFFFFFFFF)
@@ -50,6 +53,12 @@ def _second(dt):
     return (dt + timedelta(microseconds=500_000)).replace(microsecond=0)
 
 
+def _notes(m):
+    """An item's notes as plain words, whatever form they're stored in."""
+    text = m.plain_body or (html_to_text(m.html_body) if m.html_body else "")         or (rtf_to_text(m.rtf_body) if m.rtf_body else "")
+    return " ".join(text.split())
+
+
 def load(path):
     f = open_file(path)
     name_map = load_name_map(f)
@@ -72,11 +81,11 @@ def load(path):
             elif cls.startswith("IPM.APPOINTMENT"):
                 a = A.appointment_named(read_props(it, name_map))
                 items["appointment"][(m.subject, _second(a.get(A.LID_START)), _second(a.get(A.LID_END)),
-                                      bool(a.get(A.LID_ALL_DAY)), _recurrence(a))] += 1
+                                      bool(a.get(A.LID_ALL_DAY)), _recurrence(a), _notes(m))] += 1
             elif cls == "IPM.CONTACT":
                 n = {(p.named.guid, p.named.lid): p.value for p in read_props(it, name_map)
                      if p.named and p.named.lid is not None}
-                items["contact"][(m.subject, (n.get(EMAIL1) or "").lower())] += 1
+                items["contact"][(m.subject, (n.get(EMAIL1) or "").lower(), _notes(m))] += 1
         for i in range(folder.number_of_sub_folders):
             visit(folder.get_sub_folder(i))
 
@@ -99,8 +108,8 @@ def main():
             # Say which field differs for the first few mismatches
             fields = {"email": ["subject", "sender", "sent time", "received time", "read state",
                                 "body type", "attachments", "recipients"],
-                      "appointment": ["subject", "start", "end", "all-day", "recurrence"],
-                      "contact": ["name", "email"]}[kind]
+                      "appointment": ["subject", "start", "end", "all-day", "recurrence", "notes"],
+                      "contact": ["name", "email", "notes"]}[kind]
             by_subject = collections.defaultdict(list)
             for k in src:
                 by_subject[k[0]].append(k)

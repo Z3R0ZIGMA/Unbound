@@ -44,7 +44,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 
 - Dark mode throughout (dark window, light text); colours in one place (`COLORS`)
 - Header: grey geometric triangle logo, "Unbound", one-line description; window title "Unbound – Convert to PST"
-- Top: path box and a **Browse…** menu with "Outlook OST file…" and "Apple Mail export (folder)…" (a PST can be picked through "All files")
+- Top: path box and a **Browse…** menu (Ctrl+O) with "Outlook data file (OST or PST)…" and "Apple Mail export (folder)…"; both remember the last folder used
 - Middle: folder tree with item counts and checkboxes; unsupported folders greyed out
 - Bottom: large Convert button, progress bar with Cancel, status line
 
@@ -68,13 +68,14 @@ Next candidates:
 - Resuming an interrupted conversion (skipping what's already in the PST)
 - Signing the EXE so Windows SmartScreen names the publisher and trust carries over between releases: the release workflow is ready for it, and what's left is choosing a signing route and adding its credentials (see "Signing and Windows SmartScreen" in DEVELOPMENT.md)
 - Publishing through the Microsoft Store (MSIX), the only route with no SmartScreen warning from the first day
-- ~~A licence for Unbound's own code~~ MIT License, chosen 12 November 2026 ([LICENSE](LICENSE)). It also makes Unbound eligible for SignPath Foundation's free signing once the repository is public
+- ~~A licence for Unbound's own code~~ MIT License, chosen 12 November 2026 ([LICENSE](LICENSE))
 
 ## Releases
 
 - **1.0.0:** mail from OST to PST (Exchange/Microsoft 365 and IMAP OSTs)
 - **1.1.0:** calendar and contacts; PSTs created as Unicode (1.0.0 made ANSI PSTs)
 - **1.2.0:** Apple Mail (MBOX); inline images in OST emails kept again; plain-text and rich-text mail keep their format; repeating meetings in other time zones fixed; new title, logo and Browse menu
+- **1.3.3 (not released yet):** fixes and small improvements from a review of the code; see "Version 1.3.3" below. Also the MIT License
 - **1.3.2:** a mailbox that other programs have open can be converted. Word and Excel hold the Outlook profile's OST open while they run (so do Teams and Windows Search) and lock part of it, and Unbound reported "Outlook is using this file" although Outlook was closed. It now asks Windows which programs have the file open (Restart Manager) and names them. If Outlook isn't among them it reads past the lock: Windows applies such locks to ordinary reads but not to a memory-mapped view, so the folder scan reads through one and the working copy is taken through one. If Outlook has the file, it's still refused, because Outlook changes the file as it syncs; the message then offers to close Outlook, for when it's running without a window. Tested with a real lock held by a second program (scan, working copy, a full conversion compared item by item) and by scanning a real OST while Word and Excel had it open; the "Close Outlook" button is tested with a stand-in, not against a live Outlook
 - **1.3.1:** the first published build of 1.3. The 1.3.0 tag has no release: all its tests passed, but the test process crashed as it exited (windows left over from the tests), which stopped the build. Only the tests changed
 - **1.3.0:** safety and reliability; see "Version 1.3" below (tagged, not published)
@@ -135,3 +136,14 @@ From a review of the code for security, bugs and dependencies.
 - **Tests and CI.** Unit tests that need neither Outlook nor a mailbox, run with pyflakes, a build of the EXE and its self-check on every push. A generated PST fixture (`scripts/make_pst_fixture.py`) lets calendar and contacts be tested end to end without a real OST.
 - **Releases** are built by GitHub Actions from a version tag, with a checksum file, the licence notices of the bundled libraries, an optional signing step, and (for a public repository) a build attestation.
 - Full test run: unit tests; MBOX end to end (7 messages, all checks pass); PST round trips through the reader process (7/7 emails, 5/5 appointments including a series with a cancelled and a moved occurrence, 2/2 contacts identical); the same with the built EXE; the window driven through a conversion, a close during a conversion and a start after a killed conversion. Not yet run against a real OST: IANA time zones, an Exchange sender without an internet address, and recipients without an address.
+
+## Version 1.3.3: review fixes
+
+From a second review of the code for security, bugs and quick improvements to the window.
+
+- **Data that was lost.** Appointment notes stored as HTML (as Outlook stores them) were dropped, because appointments and contacts can't take HTML from another program; their text is now kept. Yearly series ("second Tuesday of March", "every two years") failed, because Outlook counts a yearly interval in months. When Outlook refuses rich text (RTF), which it did for every form tried on the test PC, the text is kept as plain text and the log says so; before, an email without a separate plain body was saved with no body. RTF read from an OST also had padding after its end that Outlook rejects.
+- **Conversions that couldn't start or finish.** One store in the Outlook profile that Outlook couldn't reach (an unavailable shared mailbox, say) stopped every conversion, after Outlook had hung for minutes on it; the new PST is now found by index, newest first, stepping over such stores. A reader that died or hung while opening a file froze the window; opening and the folder scan now have time limits. An error with no text aborted the conversion. Two folders whose names differ only in capitals or accent encoding: every item of the second failed; they now share a folder, and a name Outlook still refuses gets " (2)".
+- **Smaller bugs.** An item that failed after its first save stayed in the PST half-written; it's now removed. A recipient type with an unusual flag skipped resolving the address. Damaged values (an empty true/false, a date in the year 9999) aborted reading an item. A line break in a subject could add fake lines to the log. A file that merely starts with "From " was taken for a mailbox. The EXE's `--check` and `--convert` could hang on an error instead of returning an exit code. CI and release jobs have time limits.
+- **Security.** Unbound's own two Windows DLLs (Restart Manager, ICU) are loaded by full path from System32. The README says to keep the EXE in a folder of its own and how to check a release's build attestation.
+- **Window.** The Browse menu offers "Outlook data file (OST or PST)", so a PST no longer needs the "All files" trick; Ctrl+O opens it. "Select all mail" is now **Reset selection**. Both file windows remember the last folder (in `HKEY_CURRENT_USER\Software\Unbound`); the save window starts in the real Documents folder. Plain-English reasons when a file can't be opened, with the technical text under "Show details". If Outlook Classic isn't installed, the window says so at once and won't start a conversion. A moving bar while Outlook starts, time left measured from the first item, and the end message counts emails attached to other emails that weren't copied. Keyboard shortcuts on the buttons and names for screen readers.
+- Tests: unit tests for each fix, with stand-ins that behave as Outlook was seen to (`tests/fake_outlook.py`). End to end with generated data: the PST fixture, now with both yearly series and HTML notes (7/7 appointments and 2/2 contacts identical, notes included), and the MBOX test (all checks pass). Not done: signed or encrypted (S/MIME) mail, which may fail to convert and needs a real signed email to test.

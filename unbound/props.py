@@ -152,8 +152,9 @@ def read_props(item, name_map):
     for e in entries:
         try:
             value = _value(e)
-        except (ValueError, OSError, struct.error, TypeError, UnicodeDecodeError):
-            continue
+        except (ValueError, OSError, struct.error, TypeError, UnicodeDecodeError,
+                IndexError, OverflowError):
+            continue  # one damaged value is skipped, not the whole item
         named = name_map.get(e.entry_type) if e.entry_type >= 0x8000 else None
         if e.entry_type >= 0x8000 and named is None:
             continue  # can't say what it is, so can't recreate it

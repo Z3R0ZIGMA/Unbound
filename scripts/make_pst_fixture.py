@@ -7,7 +7,9 @@ Lets the calendar and contacts conversion be checked end to end without a
 real mailbox: convert OUTPUT.pst with Unbound, then compare the two with
 compare_pst.py. It holds a one-off appointment, an all-day event, a meeting
 with attendees, a weekly series with a cancelled and a moved occurrence, a
-monthly series with an end date, and two contacts.
+monthly series with an end date, a yearly "second Tuesday of March" series
+with notes, a series every two years, and two contacts. Outlook stores the
+appointments' notes as HTML only, which is what the notes check relies on.
 
 Needs Outlook Classic. Nothing is ever sent: the items are only saved, the
 addresses end in .test (which can't exist), and reminders are off.
@@ -25,10 +27,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from unbound.pst_writer import (  # noqa: E402
     OL_APPOINTMENT_ITEM, OL_CONTACT_ITEM, OL_FOLDER_CALENDAR, OL_FOLDER_CONTACTS,
-    OL_STORE_UNICODE, com_date,
+    OL_STORE_UNICODE, _stores_newest_first, com_date,
 )
 
-OL_WEEKLY, OL_MONTH_NTH = 1, 3
+OL_WEEKLY, OL_MONTH_NTH, OL_YEARLY, OL_YEAR_NTH = 1, 3, 5, 6
 MONDAY, TUESDAY, WEDNESDAY = 2, 4, 8
 OL_MEETING = 1
 
@@ -85,6 +87,29 @@ def build(root):
     pattern.PatternEndDate = com_date(datetime(2027, 9, 14))
     a.Save()
 
+    # Yearly series. Outlook counts a yearly interval in months, which once
+    # made both of these fail to convert
+    a = appointment(calendar, "Board meeting", datetime(2027, 3, 9, 9, 0), 120,
+                    Body="Agenda and dial-in details in the notes.")
+    pattern = a.GetRecurrencePattern()
+    pattern.RecurrenceType = OL_YEAR_NTH  # the second Tuesday of March
+    pattern.DayOfWeekMask = TUESDAY
+    pattern.Instance = 2
+    pattern.MonthOfYear = 3
+    pattern.PatternStartDate = com_date(datetime(2027, 3, 9))
+    pattern.NoEndDate = True
+    a.Save()
+
+    a = appointment(calendar, "Licence renewal", datetime(2027, 4, 1, 8, 0), 15)
+    pattern = a.GetRecurrencePattern()
+    pattern.RecurrenceType = OL_YEARLY
+    pattern.Interval = 24  # every two years, in months
+    pattern.DayOfMonth = 1
+    pattern.MonthOfYear = 4
+    pattern.PatternStartDate = com_date(datetime(2027, 4, 1))
+    pattern.Occurrences = 5
+    a.Save()
+
     for first, last, email, company in (("Alice", "Müller", "alice@example.test", "Example GmbH"),
                                         ("王", "Carol", "carol@example.test", "")):
         c = contacts.Items.Add(OL_CONTACT_ITEM)
@@ -102,8 +127,10 @@ def main():
         os.remove(path)
     ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
     ns.AddStoreEx(path, OL_STORE_UNICODE)
-    root = next(s for s in ns.Stores
-                if s.FilePath and os.path.normcase(s.FilePath) == os.path.normcase(path)).GetRootFolder()
+    # Newest store first, stepping over any Outlook can't open right now
+    # (see PstWriter._find_store)
+    root = next(s for s, p in _stores_newest_first(ns)
+                if p and os.path.normcase(p) == os.path.normcase(path)).GetRootFolder()
     try:
         root.Name = "Unbound fixture"
         build(root)

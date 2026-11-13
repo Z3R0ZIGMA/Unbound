@@ -20,6 +20,7 @@ jobs:
   release:
     name: Build, sign and publish
     runs-on: windows-latest
+    timeout-minutes: 45  # a stuck step (e.g. an error box in the windowed EXE) fails fast
     permissions:
       contents: write      # create the release
       id-token: write      # prove where the EXE was built
