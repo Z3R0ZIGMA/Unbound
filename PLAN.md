@@ -8,7 +8,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - an **Apple Mail** export (MBOX), for moving from a Mac to Windows
 - an existing **PST**, to upgrade an old ANSI-format PST to Unicode or copy only some of its folders
 
-## Features (current: 1.3.4)
+## Features (current: 1.3.5)
 
 - Open an OST, a PST, or an Apple Mail export folder (Browse, or drop it on the window)
 - Preview the folder tree with item counts; mail, calendar and contacts folders are ticked by default, system folders and shared mailboxes are not
@@ -82,6 +82,7 @@ Next candidates:
 - **1.3.2:** a mailbox that other programs have open can be converted. Word and Excel hold the Outlook profile's OST open while they run (so do Teams and Windows Search) and lock part of it, and Unbound reported "Outlook is using this file" although Outlook was closed. It now asks Windows which programs have the file open (Restart Manager) and names them. If Outlook isn't among them it reads past the lock: Windows applies such locks to ordinary reads but not to a memory-mapped view, so the folder scan reads through one and the working copy is taken through one. If Outlook has the file, it's still refused, because Outlook changes the file as it syncs; the message then offers to close Outlook, for when it's running without a window. Tested with a real lock held by a second program (scan, working copy, a full conversion compared item by item) and by scanning a real OST while Word and Excel had it open; the "Close Outlook" button is tested with a stand-in, not against a live Outlook
 - **1.3.3:** fixes and small improvements from a second review of the code and from converting a real OST; see "Version 1.3.3" below. Also the MIT License, and the first release with a build attestation
 - **1.3.4:** roughly twice as fast, phone-style time zone names translated, and three fixes in the window; see "Version 1.3.4" below
+- **1.3.5:** a new icon, window logo and social preview: a grey faceted envelope in the old triangle's greys, its top flap pointing down like the triangle. `assets/make_icon.py` draws all three. Nothing else changed in the app
 
 ## Risks and first steps
 
