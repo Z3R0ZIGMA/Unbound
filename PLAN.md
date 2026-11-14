@@ -43,7 +43,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 ## Interface layout
 
 - Dark mode throughout (dark window, light text); colours in one place (`COLORS`)
-- Header: grey geometric triangle logo, "Unbound", one-line description; window title "Unbound – Convert to PST"
+- Header: grey geometric envelope logo, "Unbound", one-line description; window title "Unbound – Convert to PST"
 - Top: path box and a **Browse…** menu (Ctrl+O) with "Outlook data file (OST or PST)…" and "Apple Mail export (folder)…"; both remember the last folder used
 - Middle: folder tree with item counts and checkboxes; unsupported folders greyed out
 - Below the tree: the selection count, **Reset selection** (the starting ticks) and **Clear**

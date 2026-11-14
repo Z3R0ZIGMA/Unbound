@@ -200,7 +200,7 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `scripts/mbox_test.py` | End-to-end MBOX check: builds the test export, converts it and verifies every message (`--verify-only` checks a PST made by the EXE) |
 | `scripts/make_pst_fixture.py` | Builds a test PST with calendar items and contacts through Outlook |
 | `scripts/compare_pst.py` | Compares a converted PST with its source, item by item |
-| `assets/make_icon.py` | Draws the app icon; re-run it after changing the colours, then rebuild |
+| `assets/make_icon.py` | Draws the app icon (also the window's logo) and the repository's social preview; re-run it after changing the colours or shape, then rebuild. Upload `assets/social-preview.png` under the repository's Settings → Social preview |
 | `requirements.txt`, `requirements-dev.txt` | Pinned dependencies with checksums: the app's, and the build tools' |
 | `.github/` | CI, the release workflow and Dependabot's settings |
 | `LICENSE` | Unbound's own licence (MIT); the copyright line is also in the EXE's file details (`Unbound.spec`) |

@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(12)
 
-        # Header: triangle logo, name, one-line description
+        # Header: envelope logo, name, one-line description
         title_row = QHBoxLayout()
         title_row.setSpacing(12)
         if os.path.exists(_icon_path()):
