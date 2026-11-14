@@ -59,7 +59,7 @@ Those two need no real mailbox. The OST scripts do: Outlook locks the OST of the
 .venv\Scripts\python scripts\copy_items_test.py C:\Temp\copy.ost C:\Temp\items.pst
 ```
 
-Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them). `copy_items_test.py` used to fail "time zone" for appointments with an IANA zone name such as `America/New_York`; since 1.3.0 those are given the matching Windows zone, which hasn't been run against a real OST yet. Everything else should pass.
+Known results: `copy_one_message.py` fails "internet headers" (Outlook doesn't allow writing them). `copy_items_test.py` used to fail "time zone" for appointments with an IANA zone name such as `America/New_York`; since 1.3.4 those are given the matching Windows zone. (1.3.0 to 1.3.3 tried to, but missed that Outlook answers an unknown zone name with nothing rather than an error, so the translation never ran.) Everything else should pass.
 
 `compare_pst.py` reports how many items in the PST are identical to the source (emails: subject, sender, times, read state, body type, attachments, recipients; appointments: times, full recurrence and notes; contacts: name, email and notes), and which field differs when one isn't. Times are compared to the second, and notes as text, since Outlook stores appointment notes as HTML that Unbound can only write back as text; invisible characters such as soft hyphens are ignored, because Outlook drops some of them. It reads every folder of both files, so against a real OST "source items not in the PST" also counts folders that weren't ticked.
 

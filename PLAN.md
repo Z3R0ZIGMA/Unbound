@@ -55,7 +55,7 @@ Done:
 
 - ~~Contacts and calendar items~~ 1.1
 - ~~Apple Mail (Mac) MBOX to PST conversion~~ 1.2
-- ~~Map time zone names in IANA format (e.g. `America/New_York`, written by phones and Google) to Windows zones~~ 1.3
+- ~~Map time zone names in IANA format (e.g. `America/New_York`, written by phones and Google) to Windows zones~~ 1.3 (working from 1.3.4)
 - ~~Emails attached to other emails in Apple Mail exports~~ 1.3 (they were being dropped)
 
 Next candidates:
