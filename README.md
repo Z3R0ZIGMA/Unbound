@@ -82,6 +82,10 @@ Outlook opens in the background during conversion (if it isn't already open) and
 
 Unbound works entirely on your PC and makes no internet connections of its own. It never sends mail: every item is only saved into the PST. Temporary files (a working copy of an OST, attachments on their way into Outlook) are deleted when a conversion ends. The only thing it keeps is the last folder you opened a file from and the last folder you saved to, in the registry under `HKEY_CURRENT_USER\Software\Unbound`.
 
+## Security
+
+To report a security problem privately, see [SECURITY.md](SECURITY.md).
+
 ## Development
 
 To run from source, rebuild the EXE, or find your way around the code, see [DEVELOPMENT.md](DEVELOPMENT.md).
