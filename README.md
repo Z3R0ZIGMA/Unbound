@@ -94,7 +94,7 @@ To report a security problem privately, see [SECURITY.md](SECURITY.md).
 
 ## Development
 
-To run from source, rebuild the EXE, or find your way around the code, see [DEVELOPMENT.md](DEVELOPMENT.md).
+To run from source, rebuild the EXE, or find your way around the code, see [DEVELOPMENT.md](DEVELOPMENT.md). To report a bug or help, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 

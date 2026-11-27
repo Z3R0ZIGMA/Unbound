@@ -208,7 +208,8 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `scripts/compare_pst.py` | Compares a converted PST with its source, item by item |
 | `assets/make_icon.py` | Draws the app icon (also the window's logo) and the repository's social preview; re-run it after changing the colours or shape, then rebuild. Upload `assets/social-preview.png` under the repository's Settings → Social preview |
 | `requirements.txt`, `requirements-dev.txt` | Pinned dependencies with checksums: the app's, and the build tools' |
-| `.github/` | CI, the release workflow and Dependabot's settings |
+| `.github/` | CI, the release workflow, Dependabot's settings, the bug report form (`ISSUE_TEMPLATE/`) and the pull request checklist |
+| `CONTRIBUTING.md` | How to report a bug or contribute, and the ground rules |
 | `.gitattributes` | Line endings: text is stored with LF, PowerShell scripts always use CRLF, images are binary |
 | `SECURITY.md` | How to report a security problem privately, and how releases are built and can be verified |
 | `LICENSE` | Unbound's own licence (MIT); the copyright line is also in the EXE's file details (`Unbound.spec`) |
