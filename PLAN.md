@@ -8,7 +8,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - an **Apple Mail** export (MBOX), for moving from a Mac to Windows
 - an existing **PST**, to upgrade an old ANSI-format PST to Unicode or copy only some of its folders
 
-## Features (current: 1.3.5)
+## Features (current: 1.3.6)
 
 - Open an OST, a PST, or an Apple Mail export folder (Browse, or drop it on the window)
 - Preview the folder tree with item counts; mail, calendar and contacts folders are ticked by default, system folders and shared mailboxes are not
@@ -18,6 +18,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 - Looks after the user's files: an existing PST is replaced by way of the Recycle Bin, Outlook's own data folder is refused as a destination, and a PST that probably won't fit (or would pass Outlook's 50 GB limit) is warned about first
 - Cleans up after itself: closing the window stops the conversion properly, and a conversion cut short by a crash is tidied away at the next start
 - Carries on past damaged parts of an OST or PST, listing the affected items in the log
+- Check for updates (from 1.3.6): asks GitHub for the latest release only when clicked, and with the user's agreement downloads it, checks it against the release's checksums and swaps it in when Unbound restarts or closes
 
 ## Architecture
 
@@ -43,7 +44,7 @@ A Windows desktop app that converts mail data into an Outlook PST file, using Ou
 ## Interface layout
 
 - Dark mode throughout (dark window, light text); colours in one place (`COLORS`)
-- Header: grey geometric envelope logo, "Unbound", one-line description; window title "Unbound – Convert to PST"
+- Header: grey geometric envelope logo, "Unbound", the version and a **Check for updates** button, one-line description; window title "Unbound – Convert to PST"
 - Top: path box and a **Browse…** menu (Ctrl+O) with "Outlook data file (OST or PST)…" and "Apple Mail export (folder)…"; both remember the last folder used
 - Middle: folder tree with item counts and checkboxes; unsupported folders greyed out
 - Below the tree: the selection count, **Reset selection** (the starting ticks) and **Clear**
@@ -83,6 +84,7 @@ Next candidates:
 - **1.3.3:** fixes and small improvements from a second review of the code and from converting a real OST; see "Version 1.3.3" below. Also the MIT License, and the first release with a build attestation
 - **1.3.4:** roughly twice as fast, phone-style time zone names translated, and three fixes in the window; see "Version 1.3.4" below
 - **1.3.5:** a new icon, window logo and social preview: a grey faceted envelope in the old triangle's greys, its top flap pointing down like the triangle. `assets/make_icon.py` draws all three. Nothing else changed in the app
+- **1.3.6:** **Check for updates**, a button in the window's header, like the one in Unravel. It asks GitHub for the latest release only when clicked, asks before downloading, checks the download against the release's `SHA256SUMS.txt`, and swaps it in when Unbound restarts or closes (not straight away, because the file reader is `Unbound.exe` started again). If the EXE's folder can't be written to, the new version goes to Downloads. The EXE's self-check now also checks that HTTPS works. The first release published as immutable. Tested with stand-ins for GitHub, and for real from source (1.3.5 found, downloaded, checksum matched, swapped into a scratch copy); a running copy of the EXE was renamed to prove the swap. The swap and restart inside the EXE first run for real when 1.3.7 is out
 
 ## Risks and first steps
 

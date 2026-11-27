@@ -12,7 +12,10 @@ You should get a reply within a week. Fixes are released as a new version, with 
 notes once the release is out.
 
 ## How Unbound is built and released
-- Unbound works entirely on the PC and makes no internet connections of its own (see the README's Privacy section).
+- Unbound works entirely on the PC. Its only internet connection is **Check for updates**, and only when the user
+  clicks it: it asks GitHub for the latest release and, if the user agrees, downloads `Unbound.exe` from this
+  repository's releases and checks it against the release's `SHA256SUMS.txt` before using it (see the README's
+  Privacy section).
 - Every dependency is pinned with checksums (`requirements*.txt`, installed with `--require-hashes`), and CI checks
   them against the public advisory databases on every push and weekly.
 - Releases are built by GitHub Actions from the tagged code (`.github/workflows/release.yml`), never on someone's own

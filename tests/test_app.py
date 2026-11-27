@@ -440,6 +440,149 @@ class ClosingOutlook(unittest.TestCase):
         self.assertEqual(done, ["C:\\mail.ost"])
 
 
+class CheckingForUpdates(WindowCase):
+    """The Check for updates button, with GitHub and the download stood in."""
+
+    def setUp(self):
+        super().setUp()
+        from unbound import updates
+        self.updates = updates
+        self.exe = os.path.join(self.dir, "Unbound.exe")
+        with open(self.exe, "wb") as fh:
+            fh.write(b"this version")
+        self.choices = []  # the button to click in each message box, in turn
+        for patcher in (mock.patch.object(self.win, "run_in_thread", self.run_now),
+                        mock.patch.object(ui, "_show_in_folder"),
+                        mock.patch.object(ui.QDesktopServices, "openUrl"),
+                        mock.patch.object(QMessageBox, "exec", lambda box: 0),
+                        mock.patch.object(QMessageBox, "clickedButton", lambda box: self.click(box))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def click(self, box):
+        """The next choice for a new box; the same answer when asked again."""
+        if box.property("clicked") is None:
+            box.setProperty("clicked", self.choices.pop(0))
+        return next(b for b in box.buttons() if b.text() == box.property("clicked"))
+
+    def run_now(self, worker, on_done, on_failed, progress=None):
+        """Run the job straight away, then finish as the real thread does."""
+        win = self.win
+        worker.done.connect(on_done)
+        worker.failed.connect(on_failed)
+        if progress:
+            worker.progress.connect(progress)
+        win.thread = win.worker = worker
+        worker.run()
+        win.thread = win.worker = None
+        win.update_controls()
+        if win._after_job:
+            job, win._after_job = win._after_job, None
+            job()
+
+    def release(self, version):
+        base = "https://github.com/Z3R0ZIGMA/Unbound/releases/download/v{}/".format(version)
+        return self.updates.Release(self.updates.parse_version(version), f"v{version}",
+                                    f"https://github.com/Z3R0ZIGMA/Unbound/releases/tag/v{version}",
+                                    base + "Unbound.exe", base + "SHA256SUMS.txt")
+
+    def check(self, latest, exe=True, download=None):
+        def fake_download(release, target, progress=None, cancelled=None):
+            if download:
+                raise download
+            progress(100)
+            with open(target, "wb") as fh:
+                fh.write(b"new version")
+        with mock.patch.object(self.updates, "get_latest", return_value=latest), \
+                mock.patch.object(self.updates, "running_exe", return_value=self.exe if exe else None), \
+                mock.patch.object(self.updates, "download", fake_download):
+            self.win.update_btn.click()
+
+    def test_up_to_date(self):
+        self.check(self.release(ui.__version__))
+        self.assertIn(f"up to date ({ui.__version__})", self.win.status.text())
+        self.assertTrue(self.win.update_btn.isEnabled())
+
+    def test_nothing_to_update_to(self):
+        self.check(None)
+        self.assertIn("Couldn't find a release", self.win.status.text())
+
+    def test_github_unreachable(self):
+        with mock.patch.object(self.updates, "get_latest",
+                               side_effect=self.updates.UpdateError("Couldn't reach GitHub.")):
+            self.win.update_btn.click()
+        self.assertEqual(self.win.status.text(), "Couldn't update: Couldn't reach GitHub.")
+        self.assertTrue(self.win.update_btn.isEnabled())
+
+    def test_run_from_source_opens_the_release_page(self):
+        with mock.patch.object(ui.QDesktopServices, "openUrl") as opened:
+            self.check(self.release("99.0.0"), exe=False)
+        self.assertIn("/releases/tag/v99.0.0", opened.call_args[0][0].toString())
+        self.assertIn("99.0.0 is available", self.win.status.text())
+
+    def test_not_now(self):
+        self.choices = ["Not now"]
+        self.check(self.release("99.0.0"))
+        self.assertIn("click Check for updates when you're ready", self.win.status.text())
+        self.assertFalse(os.path.exists(self.exe + ".new"))
+
+    def test_later_swaps_it_in_when_unbound_closes(self):
+        """The running copy stays as it is until Unbound closes, so this
+        session never starts its file reader from the new version."""
+        self.choices = ["Download", "Later"]
+        self.check(self.release("99.0.0"))
+        with open(self.exe, "rb") as fh:
+            self.assertEqual(fh.read(), b"this version")
+        self.assertFalse(self.win.update_btn.isEnabled())  # one update at a time
+        with mock.patch.object(self.updates, "running_exe", return_value=self.exe), \
+                mock.patch.object(self.updates, "start_new_instance") as started:
+            self.win.close()
+        with open(self.exe, "rb") as fh:
+            self.assertEqual(fh.read(), b"new version")
+        self.assertTrue(os.path.exists(self.exe + ".old"))
+        started.assert_not_called()
+
+    def test_restart_now(self):
+        self.choices = ["Download", "Restart now"]
+        with mock.patch.object(self.updates, "start_new_instance") as started:
+            self.check(self.release("99.0.0"))
+        with open(self.exe, "rb") as fh:
+            self.assertEqual(fh.read(), b"new version")
+        started.assert_called_once_with(self.exe)
+
+    def test_a_bad_download_changes_nothing(self):
+        self.choices = ["Download"]
+        self.check(self.release("99.0.0"), download=self.updates.UpdateError(
+            "The download doesn't match the release's checksum, so it wasn't used."))
+        self.assertIn("checksum", self.win.status.text())
+        self.assertTrue(self.win.update_btn.isEnabled())
+        with open(self.exe, "rb") as fh:
+            self.assertEqual(fh.read(), b"this version")
+
+    def test_read_only_folder_saves_to_downloads(self):
+        self.choices = ["Download"]
+        targets = []
+
+        def download(release, target, progress=None, cancelled=None):
+            targets.append(target)
+            if target.endswith(".new"):
+                raise PermissionError("Access is denied")
+        with mock.patch.object(self.updates, "get_latest", return_value=self.release("99.0.0")), \
+                mock.patch.object(self.updates, "running_exe", return_value=self.exe), \
+                mock.patch.object(self.updates, "download", download):
+            self.win.update_btn.click()
+        self.assertTrue(targets[1].endswith(os.path.join("Downloads", "Unbound-99.0.0.exe")))
+        self.assertIn("saved to", self.win.status.text())
+        ui._show_in_folder.assert_called_once_with(targets[1])
+        self.assertIsNone(self.win._staged_update)
+
+    def test_not_while_converting(self):
+        self.load()
+        self.win.thread = object()
+        self.win.update_controls()
+        self.assertFalse(self.win.update_btn.isEnabled())
+
+
 class AfterACrash(unittest.TestCase):
     def test_detaching_the_old_pst_has_a_time_limit(self):
         """Without one, an Outlook that doesn't answer kept the window from

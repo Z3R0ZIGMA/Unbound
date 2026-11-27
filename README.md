@@ -24,6 +24,8 @@ gh attestation verify Unbound.exe --repo Z3R0ZIGMA/Unbound
 
 Keep `Unbound.exe` in a folder of its own rather than running it from Downloads. Windows looks for some of the files a program loads in that program's own folder first, so a file left in Downloads by something else could be loaded in their place.
 
+**Updating.** Click **Check for updates** at the top of the window (from 1.3.6 on). If a newer version is out, Unbound asks before downloading it, checks the download against the release's `SHA256SUMS.txt`, and puts it in place of the old `Unbound.exe` when you restart Unbound (or the next time you close it). If `Unbound.exe`'s folder can't be changed, for example under Program Files, the new version is saved to your Downloads folder instead. Unbound never checks for updates by itself.
+
 To build it yourself instead, see [DEVELOPMENT.md](DEVELOPMENT.md#build-the-exe).
 
 ## Requirements
@@ -84,7 +86,7 @@ Outlook opens in the background during conversion (if it isn't already open) and
 
 ## Privacy
 
-Unbound works entirely on your PC and makes no internet connections of its own. It never sends mail: every item is only saved into the PST. Temporary files (a working copy of an OST, attachments on their way into Outlook) are deleted when a conversion ends. The only thing it keeps is the last folder you opened a file from and the last folder you saved to, in the registry under `HKEY_CURRENT_USER\Software\Unbound`.
+Unbound works entirely on your PC. It connects to the internet only when you click **Check for updates**: then it asks GitHub (`api.github.com`) for Unbound's latest release, sending nothing but Unbound's version number, and downloads the new `Unbound.exe` only if you agree. It never checks by itself. It never sends mail: every item is only saved into the PST. Temporary files (a working copy of an OST, attachments on their way into Outlook) are deleted when a conversion ends. The only thing it keeps is the last folder you opened a file from and the last folder you saved to, in the registry under `HKEY_CURRENT_USER\Software\Unbound`.
 
 ## Security
 

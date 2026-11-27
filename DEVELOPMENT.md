@@ -72,7 +72,7 @@ Start-Process dist\Unbound.exe -ArgumentList '--check', 'check.txt' -Wait
 Get-Content check.txt
 ```
 
-Every line should start with `OK`. The second converts without the window (the folders ticked by default), writes the usual log next to the PST, and exits with 0 if nothing failed:
+Every line should start with `OK`. One line checks that secure (HTTPS) connections work, for Check for updates, without connecting to anything. The second converts without the window (the folders ticked by default), writes the usual log next to the PST, and exits with 0 if nothing failed:
 
 ```powershell
 # Apple Mail: convert the test export with the EXE, then check every message
@@ -176,6 +176,7 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 - **Outlook's objects share what's known about their type.** pywin32 asks a COM server to describe every new object from scratch, which was about half the time an email took. `_Dispatch` in `unbound/pst_writer.py` shares a type's description between its objects for one conversion. It leans on pywin32's insides (`win32com.client.dynamic`), so a unit test and the EXE's self-check ("shared COM types") both exercise it; if a pywin32 update breaks it, they fail, and `_outlook()` falls back to pywin32's ordinary objects.
 - **Properties are copied one at a time, on purpose.** `PropertyAccessor.SetProperties` is far quicker, but with an item's copied properties it crashed Outlook on a contact and behaved differently on appointments. Only an email's sender and date fields, a fixed set of text and dates, go in one call.
 - **Detaching the PST has a time limit.** Outlook was seen to stop answering at that point during a Microsoft 365 outage. Detaching is asked of Outlook from a thread of its own (`DETACH_TIMEOUT` in `unbound/pst_writer.py`, 3 minutes); if it doesn't answer, the conversion finishes anyway and reports the PST as possibly still attached, with the counts.
+- **An update is swapped in when Unbound closes, not when it's downloaded.** Windows lets a running program be renamed but not overwritten, so Check for updates downloads the new EXE as `Unbound.exe.new` next to the running one and checks it against the release's `SHA256SUMS.txt`. When Unbound closes (or restarts, if the user chooses Restart now), the running `Unbound.exe` is renamed to `Unbound.exe.old` and the new one takes its name; the next start deletes the `.old` file. Swapping only then matters because the reader process is `Unbound.exe` started again: a session swapped mid-way would start its readers from the new version. A restart is started with `PYINSTALLER_RESET_ENVIRONMENT=1`, so the new version unpacks its own files instead of reusing the old one's. Only files under this repository's own release downloads are fetched, and only after the user agrees.
 
 ## Project layout
 
@@ -194,6 +195,7 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `unbound/props.py` | Reads every property of an item, resolving named properties via the file's name-to-ID map |
 | `unbound/appointment.py` | Decodes recurrence patterns and time zones, which Outlook only accepts through its object model |
 | `unbound/timezones.py` | Windows names for IANA time zones (`America/New_York`), asked of Windows itself |
+| `unbound/updates.py` | Check for updates: asks GitHub for the latest release, downloads `Unbound.exe` and checks it against `SHA256SUMS.txt`, and swaps it in for the running EXE |
 | `unbound/mapi.py` | MAPI property tags shared by reader and writer |
 | `unbound/errors.py` | Error text as shown in the window and the log |
 | `tests/` | Unit tests (no Outlook needed); `tests/fakes.py` and `tests/fake_outlook.py` are the stand-ins for the reader and for Outlook |

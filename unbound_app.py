@@ -24,7 +24,8 @@ def self_check(report_path):
     for name in ("pypff", "pythoncom", "pywintypes", "win32com.client", "win32timezone",
                  "PySide6.QtWidgets", "unbound.app", "unbound.converter",
                  "unbound.pst_writer", "unbound.props", "unbound.appointment",
-                 "unbound.mbox_reader", "unbound.pff_process", "unbound.timezones"):
+                 "unbound.mbox_reader", "unbound.pff_process", "unbound.timezones",
+                 "unbound.updates"):
         try:
             mod = __import__(name, fromlist=["_"])
             extra = f" {mod.get_version()}" if name == "pypff" else ""
@@ -96,6 +97,21 @@ def self_check(report_path):
     except Exception as e:
         ok = False
         lines.append(f"FAIL time zone names: {e}")
+
+    # Check for updates talks to GitHub over HTTPS, which needs Python's ssl
+    # module and Windows' trusted certificates. Nothing is sent here
+    try:
+        import ssl
+        context = ssl.create_default_context()
+        roots = len(context.get_ca_certs())
+        if roots:
+            lines.append(f"OK   secure connections ({ssl.OPENSSL_VERSION}, {roots} trusted roots)")
+        else:
+            ok = False
+            lines.append("FAIL secure connections: no trusted certificates found")
+    except Exception as e:
+        ok = False
+        lines.append(f"FAIL secure connections: {e}")
 
     try:
         from unbound.app import _icon_path

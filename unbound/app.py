@@ -8,16 +8,16 @@ import sys
 import time
 
 from PySide6.QtCore import (
-    QFile, QObject, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, Signal,
+    QFile, QObject, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal,
 )
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPalette, QShortcut
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__
+from . import __version__, updates
 from .converter import (
     CALENDAR, CONTACTS, MAIL, PST_SIZE_LIMIT, STILL_ATTACHED_ADVICE, convert, estimated_pst_size,
     is_outlook_data_file, log_path_for, recover_interrupted, scan_folders,
@@ -312,6 +312,60 @@ class CloseOutlookWorker(QObject):
             pythoncom.CoUninitialize()
 
 
+class CheckUpdateWorker(QObject):
+    """Asks GitHub for the latest release (Check for updates)."""
+    done = Signal(object)  # the Release, or None when there's none to update to
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            self.done.emit(updates.get_latest())
+        except updates.UpdateError as e:
+            self.failed.emit(str(e))
+        except Exception as e:  # never leave the window waiting
+            self.failed.emit(first_line(e))
+
+
+class DownloadUpdateWorker(QObject):
+    """Downloads a release's Unbound.exe and checks it against the release's
+    checksums: next to the running Unbound.exe, to be swapped in when Unbound
+    closes, or to Downloads when that folder can't be written to."""
+    progress = Signal(int)
+    done = Signal(str, bool)  # where it was saved; whether it's ready to swap in
+    failed = Signal(str)
+
+    def __init__(self, release, exe):
+        super().__init__()
+        self.release = release
+        self.exe = exe
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def _download(self, target):
+        updates.download(self.release, target, progress=self.progress.emit,
+                         cancelled=lambda: self._cancel)
+
+    def run(self):
+        staged = updates.staged_path(self.exe)
+        try:
+            try:
+                self._download(staged)
+                self.done.emit(staged, True)
+            except PermissionError:
+                # A folder that can't be written to (Program Files, a locked
+                # USB stick): save it where the user can get it
+                downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+                saved = os.path.join(downloads, f"Unbound-{self.release.name}.exe")
+                self._download(saved)
+                self.done.emit(saved, False)
+        except updates.UpdateError as e:
+            self.failed.emit(str(e))
+        except Exception as e:
+            self.failed.emit(first_line(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, interrupted=()):
         super().__init__()
@@ -328,6 +382,9 @@ class MainWindow(QMainWindow):
         self._pending_path = None  # a file to load once the current job is done
         self._after_job = None  # something to start once the current job's thread has finished
         self._interrupted = list(interrupted)
+        self._release = None  # the newer release found by Check for updates
+        self._staged_update = None  # a downloaded Unbound.exe to swap in at close
+        self._restart_after_update = False
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -353,6 +410,12 @@ class MainWindow(QMainWindow):
         version = QLabel(f"Version {__version__}")
         version.setObjectName("muted")
         title_row.addWidget(version, 0, Qt.AlignBottom)
+        self.update_btn = QPushButton("Check for &updates")
+        self.update_btn.setToolTip(
+            "Asks GitHub whether a newer Unbound is out and, if you agree, downloads it "
+            "(checked against the release's checksum)")
+        self.update_btn.clicked.connect(self.check_for_updates)
+        title_row.addWidget(self.update_btn, 0, Qt.AlignBottom)
         subtitle = QLabel("Convert an Outlook OST or PST, or an Apple Mail export (MBOX), "
                           "into a new PST")
         subtitle.setObjectName("muted")
@@ -635,6 +698,7 @@ class MainWindow(QMainWindow):
         busy = self.busy()
         has_tree = self.tree.topLevelItemCount() > 0
         self.browse_btn.setEnabled(not busy)
+        self.update_btn.setEnabled(not busy and self._staged_update is None)
         self.tree.setEnabled(not busy)
         self.all_btn.setEnabled(has_tree and not busy)
         self.none_btn.setEnabled(has_tree and not busy)
@@ -836,6 +900,125 @@ class MainWindow(QMainWindow):
         self.status.setText("Conversion failed")
         QMessageBox.critical(self, APP_NAME, msg)
 
+    # ---------- check for updates ----------
+
+    def check_for_updates(self):
+        if self.busy():
+            return
+        self.status.setText("Checking GitHub for a newer version…")
+        self.run_in_thread(CheckUpdateWorker(), self.on_update_checked, self.on_update_failed)
+        self.update_controls()
+
+    def on_update_checked(self, release):
+        if self._closing:
+            return
+        current = updates.parse_version(__version__)
+        if release is None:
+            self.status.setText("Couldn't find a release to update to.")
+        elif not updates.is_newer(release.version, current):
+            self.status.setText(f"Unbound is up to date ({__version__}).")
+        else:
+            # Asked once this check's thread has finished: the download is
+            # a job of its own
+            self._release = release
+            self._after_job = self._offer_update
+
+    def _offer_update(self):
+        release, self._release = self._release, None
+        exe = updates.running_exe()
+        if exe is None:
+            self.status.setText(f"Unbound {release.name} is available. This copy runs from "
+                                "source: get the new version from the releases page.")
+            QDesktopServices.openUrl(QUrl(release.page_url))
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"Unbound {release.name} is available (you have {__version__}).")
+        box.setInformativeText("Download it now? It's checked against the release's checksum "
+                               "before it's used, and replaces this copy when Unbound restarts.")
+        download_btn = box.addButton("Download", QMessageBox.AcceptRole)
+        notes_btn = box.addButton("What's new", QMessageBox.ActionRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.setDefaultButton(download_btn)
+        box.exec()
+        if box.clickedButton() == notes_btn:
+            QDesktopServices.openUrl(QUrl(release.page_url))
+        if box.clickedButton() != download_btn:
+            self.status.setText(f"Unbound {release.name} is available: click Check for updates "
+                                "when you're ready.")
+            return
+        self.status.setText(f"Downloading Unbound {release.name}…")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self._release = release
+        self.run_in_thread(DownloadUpdateWorker(release, exe), self.on_update_downloaded,
+                           self.on_update_failed, progress=self.on_update_progress)
+        self.update_controls()
+
+    def on_update_progress(self, percent):
+        self.progress.setValue(percent)
+        self.status.setText(f"Downloading the new version… {percent}%")
+
+    def on_update_downloaded(self, path, ready):
+        release, self._release = self._release, None
+        if self._closing:
+            return
+        self.progress.setValue(0)
+        if not ready:
+            self.status.setText(f"Unbound.exe's folder can't be changed, so Unbound {release.name} "
+                                f"was saved to {path}. Use that copy from now on.")
+            _show_in_folder(path)
+            return
+        self._staged_update = (path, release.name)
+        self.status.setText(f"Unbound {release.name} is downloaded and checked. "
+                            "It's used from the next time Unbound starts.")
+        self._after_job = self._offer_restart
+
+    def _offer_restart(self):
+        name = self._staged_update[1]
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"Unbound {name} is downloaded and checked.")
+        box.setInformativeText("Restart Unbound now to use it? Otherwise it's used from the "
+                               "next time you open Unbound.")
+        restart_btn = box.addButton("Restart now", QMessageBox.AcceptRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.setDefaultButton(restart_btn)
+        box.exec()
+        if box.clickedButton() == restart_btn:
+            self._restart_after_update = True
+            self.close()
+
+    def on_update_failed(self, msg):
+        self._release = None
+        if self._closing:
+            return
+        self.progress.setValue(0)
+        self.status.setText(f"Couldn't update: {msg}")
+
+    def _finish_update(self):
+        """Swap the downloaded version in for this one (and start it, after
+        Restart now). Done as Unbound closes, so that this session never
+        starts its file reader from the new version."""
+        if not self._staged_update:
+            return
+        (staged, name), self._staged_update = self._staged_update, None
+        exe = updates.running_exe()
+        try:
+            updates.install(staged, exe)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, f"Unbound {name} couldn't be put in place of "
+                                f"this copy: {first_line(e)}\n\nClick Check for updates to try again.")
+            return
+        if self._restart_after_update:
+            try:
+                updates.start_new_instance(exe)
+            except OSError as e:
+                QMessageBox.warning(self, APP_NAME, f"Unbound was updated to {name}, but couldn't "
+                                    f"be started again: {first_line(e)}\n\nOpen it as usual.")
+
     # ---------- threading ----------
 
     def run_in_thread(self, worker, on_done, on_failed, progress=None):
@@ -868,6 +1051,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if not self.busy():
+            self._finish_update()
             event.accept()
             return
         # Never close with a job still running: the conversion has to detach
@@ -888,6 +1072,8 @@ class MainWindow(QMainWindow):
             # A reader stuck on a damaged file would never notice the cancel
             QTimer.singleShot(15_000, kill_readers)
         else:
+            if isinstance(self.worker, DownloadUpdateWorker):
+                self.worker.cancel()  # the part-downloaded file is deleted
             kill_readers()  # only reading folders: nothing to tidy up
 
 
@@ -947,6 +1133,8 @@ def main():
     if os.path.exists(_icon_path()):
         app.setWindowIcon(QIcon(_icon_path()))
     apply_dark_theme(app)
+    # The previous version, left by an update while it was still running
+    updates.clean_up(updates.running_exe())
     # Temporary files of a conversion that crashed are removed here; the
     # window then detaches that conversion's PST from Outlook
     win = MainWindow(recover_interrupted())
