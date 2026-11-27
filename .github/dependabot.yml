@@ -1,11 +1,17 @@
 # Opens a pull request when a dependency or a GitHub Action has a new
 # version, with the new checksums filled in. CI then builds and tests it.
+#
+# A new version is only proposed once it has been out for 7 days, so a
+# hijacked or broken release is usually found and pulled before it reaches
+# this project. Security updates for a known vulnerability don't wait.
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       # These are released together and must match each other
       qt:
@@ -17,3 +23,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

@@ -1,5 +1,9 @@
 # Unbound
 
+[![CI](https://github.com/Z3R0ZIGMA/Unbound/actions/workflows/ci.yml/badge.svg)](https://github.com/Z3R0ZIGMA/Unbound/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Z3R0ZIGMA/Unbound)](https://github.com/Z3R0ZIGMA/Unbound/releases/latest)
+[![MIT License](https://img.shields.io/github/license/Z3R0ZIGMA/Unbound)](LICENSE)
+
 Windows desktop app that converts an Outlook OST file (for example one copied from another PC) into a PST: mail, calendar and contacts. It also converts **Apple Mail** mailboxes exported on a Mac (MBOX), for moving from a Mac to Windows, and can re-save an existing **PST** as a new one. It reads the OST directly with [libpff](https://github.com/libyal/libpff), so it needs neither the original PC nor its Outlook profile, and writes the PST through Outlook Classic on this PC. See [PLAN.md](PLAN.md) for the design and roadmap.
 
 ## Download

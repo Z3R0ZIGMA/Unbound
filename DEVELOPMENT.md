@@ -151,7 +151,7 @@ From the next tag on, the release workflow signs the EXE, checks the signature a
 
 ## Updating dependencies
 
-[Dependabot](.github/dependabot.yml) opens a pull request each week for any dependency or GitHub Action with a new version, with the new checksums filled in; CI then builds and tests it. PySide6 and shiboken6 are updated together because they must match.
+[Dependabot](.github/dependabot.yml) opens a pull request each week for any dependency or GitHub Action with a new version, with the new checksums filled in; CI then builds and tests it. PySide6 and shiboken6 are updated together because they must match. A new version is only proposed once it has been out for 7 days (a "cooldown"), so a hijacked or broken release is usually pulled before it gets here; security updates for a known vulnerability come straight away. A merged pull request's branch is deleted automatically.
 
 To change a version by hand, the checksums have to be regenerated too. In a separate, throwaway environment:
 
