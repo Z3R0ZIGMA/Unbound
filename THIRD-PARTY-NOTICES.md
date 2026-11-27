@@ -5,12 +5,17 @@ Unbound.exe contains the following software, each under its own licence. None of
 | Component | Version | Licence | Source |
 |---|---|---|---|
 | Python runtime | 3.15 | Python Software Foundation License 2.0 | https://www.python.org/downloads/source/ |
+| Libraries the Python runtime bundles: OpenSSL (used for HTTPS by Check for updates), libffi, bzip2, Zstandard, XZ, expat and the Microsoft C runtime | as shipped with Python 3.15 | Each under its own licence: OpenSSL under the Apache License 2.0, the others under MIT, BSD-style or similar permissive licences | https://www.python.org/downloads/source/ and https://openssl-library.org/source/ |
 | Qt for Python (PySide6, Shiboken6) and the Qt libraries they include | 6.12.0 | GNU Lesser General Public License v3.0 | https://code.qt.io/cgit/pyside/pyside-setup.git/ and https://download.qt.io/official_releases/qt/ |
 | libpff and its Python bindings (pypff) | 20261030 | GNU Lesser General Public License v3.0 or later | https://github.com/libyal/libpff |
 | pywin32 | 312 | Python Software Foundation License 2.0 | https://github.com/mhammond/pywin32 |
 | PyInstaller bootloader | 6.22.3 | GNU General Public License v2.0 or later, with an exception that allows it to start programs under any licence | https://github.com/pyinstaller/pyinstaller |
 
 The versions are the ones pinned in `requirements.txt` and `requirements-dev.txt`.
+
+## Python and the libraries it bundles
+
+Python's licence, followed by the licence of each library it bundles (among them the full text of the Apache License 2.0 that covers OpenSSL), is in [third-party-licenses/Python-3.15-LICENSE.txt](third-party-licenses/Python-3.15-LICENSE.txt), as Python ships it. In a release, it follows this page in `Third-party-licenses.txt`.
 
 ## The LGPL libraries
 

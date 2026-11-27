@@ -101,7 +101,8 @@ jobs:
           $hash = (Get-FileHash dist\Unbound.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  Unbound.exe" | Set-Content -Encoding ascii dist\SHA256SUMS.txt
           Get-Content dist\SHA256SUMS.txt
-          Get-Content THIRD-PARTY-NOTICES.md, third-party-licenses\LGPL-3.0.txt, third-party-licenses\GPL-3.0.txt |
+          Get-Content THIRD-PARTY-NOTICES.md, third-party-licenses\Python-3.15-LICENSE.txt,
+                      third-party-licenses\LGPL-3.0.txt, third-party-licenses\GPL-3.0.txt |
             Set-Content -Encoding utf8 dist\Third-party-licenses.txt
 
       # A signed statement, kept by GitHub, that this exact file was built by

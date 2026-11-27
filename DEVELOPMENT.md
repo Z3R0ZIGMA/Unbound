@@ -212,4 +212,4 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `.gitattributes` | Line endings: text is stored with LF, PowerShell scripts always use CRLF, images are binary |
 | `SECURITY.md` | How to report a security problem privately, and how releases are built and can be verified |
 | `LICENSE` | Unbound's own licence (MIT); the copyright line is also in the EXE's file details (`Unbound.spec`) |
-| `THIRD-PARTY-NOTICES.md`, `third-party-licenses/` | The software inside the EXE and the licence texts it requires (LGPL and GPL), shipped with each release |
+| `THIRD-PARTY-NOTICES.md`, `third-party-licenses/` | The software inside the EXE and the licence texts it requires (Python's own licence file, which also covers the libraries Python bundles such as OpenSSL, plus the LGPL and GPL), shipped with each release. When the Python version changes, replace `Python-3.15-LICENSE.txt` with the new version's `LICENSE.txt` and update the release workflow |
