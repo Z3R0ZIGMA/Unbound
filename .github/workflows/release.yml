@@ -114,6 +114,9 @@ jobs:
         with:
           subject-path: dist/Unbound.exe
 
+      # Releases are immutable once published (a repository setting), so the
+      # release is made as a draft with every file attached, then published,
+      # as GitHub advises: a published release can't have files added later
       - name: Publish the release
         shell: pwsh
         env:
@@ -122,6 +125,9 @@ jobs:
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           gh release create $env:GITHUB_REF_NAME `
             dist/Unbound.exe dist/SHA256SUMS.txt dist/Third-party-licenses.txt `
-            --repo $env:GITHUB_REPOSITORY --verify-tag `
+            --repo $env:GITHUB_REPOSITORY --verify-tag --draft `
             --title "Unbound $version" --generate-notes `
             --notes "Download Unbound.exe below. To check your download, run Get-FileHash Unbound.exe in PowerShell and compare the result with SHA256SUMS.txt. What changed in each version is listed under Releases in PLAN.md."
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
