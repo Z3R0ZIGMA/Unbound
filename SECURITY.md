@@ -18,3 +18,4 @@ notes once the release is out.
 - Releases are built by GitHub Actions from the tagged code (`.github/workflows/release.yml`), never on someone's own
   PC. Each release has `SHA256SUMS.txt` and a build provenance attestation:
   `gh attestation verify Unbound.exe --repo Z3R0ZIGMA/Unbound`.
+- From 1.3.6 on, releases are immutable: once published, a release's files and its tag can't be changed.

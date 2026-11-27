@@ -102,7 +102,9 @@ The result is `dist\Unbound.exe` (about 43 MB; the release build on GitHub is ab
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every push to `main` and every pull request:
 
 - **Test and build** (Windows): installs the pinned dependencies with checksums enforced, runs pyflakes and the unit tests, builds the EXE and runs its `--check`. The EXE is kept for a week as a download on the run's page, for trying a change out.
-- **Dependency audit:** looks every pinned package up in the public vulnerability databases with `pip-audit`. It also runs every Monday, so a vulnerability announced after the last push still shows up.
+- **Dependency audit:** looks every pinned package up in the public vulnerability databases with `pip-audit`.
+
+Both jobs also run every Monday, so a vulnerability announced after the last push still shows up, and so does a build broken by a change on GitHub's side.
 
 Outlook isn't available there, so the end-to-end scripts above stay a manual step before a release.
 
@@ -117,9 +119,11 @@ Outlook isn't available there, so the end-to-end scripts above stay a manual ste
    git push origin v1.4.0
    ```
 
-   Never move or re-push a tag that's already on GitHub. If a release build fails, fix it and release the next patch version.
+   Never move or re-push a tag that's already on GitHub; a ruleset on the repository refuses it for any `v*` tag. If a release build fails, fix it and release the next patch version.
 
-[.github/workflows/release.yml](.github/workflows/release.yml) then builds the EXE on GitHub from the tagged code (so it always matches what's in the repo), signs it if signing is set up, and publishes a release with `Unbound.exe`, its checksum in `SHA256SUMS.txt`, and the licence notices. You can edit the release's notes afterwards on its page. Nothing is published if a test or the EXE's self-check fails, or if the tag doesn't match the version in the code. Watch the run under the repository's **Actions** tab.
+[.github/workflows/release.yml](.github/workflows/release.yml) then builds the EXE on GitHub from the tagged code (so it always matches what's in the repo), signs it if signing is set up, and publishes a release with `Unbound.exe`, its checksum in `SHA256SUMS.txt`, and the licence notices.
+
+Releases are immutable (a repository setting since November 2026, so from 1.3.6 on): once published, a release's files and its tag can't be changed or deleted, and a deleted release's tag name can't be used again. Its title and notes can still be edited on its page. So a mistake in a published release is fixed by releasing the next patch version. Nothing is published if a test or the EXE's self-check fails, or if the tag doesn't match the version in the code. Watch the run under the repository's **Actions** tab.
 
 While the repository is public, the workflow also records a build attestation: GitHub's signed statement that this exact file was built by this workflow from this commit. Anyone can check a download with `gh attestation verify Unbound.exe --repo Z3R0ZIGMA/Unbound`. GitHub doesn't offer that for private repositories on standard plans, so the step is skipped there.
 
@@ -203,5 +207,7 @@ Then replace everything below the comment at the top of `requirements.txt` (or `
 | `assets/make_icon.py` | Draws the app icon (also the window's logo) and the repository's social preview; re-run it after changing the colours or shape, then rebuild. Upload `assets/social-preview.png` under the repository's Settings → Social preview |
 | `requirements.txt`, `requirements-dev.txt` | Pinned dependencies with checksums: the app's, and the build tools' |
 | `.github/` | CI, the release workflow and Dependabot's settings |
+| `.gitattributes` | Line endings: text is stored with LF, PowerShell scripts always use CRLF, images are binary |
+| `SECURITY.md` | How to report a security problem privately, and how releases are built and can be verified |
 | `LICENSE` | Unbound's own licence (MIT); the copyright line is also in the EXE's file details (`Unbound.spec`) |
 | `THIRD-PARTY-NOTICES.md`, `third-party-licenses/` | The software inside the EXE and the licence texts it requires (LGPL and GPL), shipped with each release |
